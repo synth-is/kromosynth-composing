@@ -1,0 +1,605 @@
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import StrudelPad from './components/StrudelPad.jsx';
+import * as api from './lib/api.js';
+import { getEvoRunId, isDefaultSettings, DEFAULT_RENDER } from './lib/render.js';
+import { makeSnapshot, appendSnapshot, snapshotLabel } from './lib/trajectory.js';
+import { isAbletonHost, buildStemsSelection, sendToLive } from './lib/ableton.js';
+import { bounceToWav, bytesToBase64 } from './lib/bounce.js';
+import { renderToWavUrl } from './lib/renderClient.js';
+import { getEnvironment } from './lib/environments.js';
+
+const ABLETON = isAbletonHost();
+
+export default function App() {
+  const padRef = useRef(null);
+  const auditionRef = useRef(null);
+
+  const [user, setUser] = useState(null);
+  const [source, setSource] = useState('public'); // 'public' | 'garden'
+  const [sounds, setSounds] = useState([]);
+  const [loadingSounds, setLoadingSounds] = useState(false);
+  const [soundsError, setSoundsError] = useState('');
+  const [query, setQuery] = useState('');
+  // kit entry: { name, soundId, evoRunId, previewUrl, url, duration, label, settings, rendering }
+  const [kit, setKit] = useState([]);
+  const [settingsFor, setSettingsFor] = useState(null);
+  const [auditionId, setAuditionId] = useState(null);
+  const [status, setStatus] = useState('');
+
+  const [trajectory, setTrajectory] = useState([]);
+  const [scrubIndex, setScrubIndex] = useState(null);
+
+  const [showLogin, setShowLogin] = useState(false);
+  const [showSave, setShowSave] = useState(false);
+  const [showOpen, setShowOpen] = useState(false);
+  const [showBounce, setShowBounce] = useState(false);
+
+  const flash = useCallback((msg) => {
+    setStatus(msg);
+    window.clearTimeout(flash._t);
+    flash._t = window.setTimeout(() => setStatus(''), 3000);
+  }, []);
+
+  // On load: adopt an SSO token handed off from the main app (#token=…), else
+  // restore any existing same-origin session.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const adopted = await api.adoptTokenFromHash();
+      if (cancelled) return;
+      setUser(adopted || api.restoreSession());
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setLoadingSounds(true);
+      setSoundsError('');
+      try {
+        const list = source === 'garden'
+          ? await api.fetchGardenSounds(user.id)
+          : await api.fetchPublicSounds({ orderBy: 'recent', limit: 200 });
+        if (!cancelled) setSounds(list);
+      } catch (err) {
+        if (!cancelled) { setSounds([]); setSoundsError(err.message || 'Failed to load sounds'); }
+      } finally {
+        if (!cancelled) setLoadingSounds(false);
+      }
+    }
+    if (source === 'garden' && !user) return;
+    load();
+    return () => { cancelled = true; };
+  }, [source, user]);
+
+  const chooseSource = (next) => {
+    if (next === 'garden' && !user) { setShowLogin(true); return; }
+    setSource(next);
+  };
+
+  // --- kit ---
+  const getKitMap = useCallback(
+    () => Object.fromEntries(kit.filter((k) => k.url).map((k) => [k.name, k.url])),
+    [kit]
+  );
+
+  // Duplicates are allowed on purpose: the same genome can be added again to get a
+  // second Strudel key rendered at different settings.
+  const addToKit = (sound) => {
+    const taken = new Set(kit.map((k) => k.name));
+    const name = api.uniqueSampleName(sound, taken);
+    const entry = {
+      name,
+      soundId: sound.id,
+      evoRunId: getEvoRunId(sound),
+      previewUrl: sound.previewUrl || null,
+      url: sound.previewUrl || null,
+      duration: sound.duration ?? null,
+      label: sound.label,
+      settings: null,
+      rendering: false,
+    };
+    setKit((prev) => [...prev, entry]);
+    flash(`Added as s("${name}")`);
+    // Use the pre-rendered preview WAV when the sound has one (instant); only render
+    // on demand when it doesn't. (Preview presence comes from audio_preview_url.)
+    if (!entry.previewUrl) renderKitEntry(entry);
+  };
+
+  const removeFromKit = (name) => {
+    setKit((prev) => prev.filter((k) => k.name !== name));
+    if (settingsFor === name) setSettingsFor(null);
+  };
+
+  // Changing settings reverts the key to the preview render until it's re-rendered
+  // (rendering is a network call, triggered explicitly via the panel's Render button).
+  const updateKitSettings = (name, patch) => {
+    setKit((prev) => prev.map((k) => {
+      if (k.name !== name) return k;
+      const merged = { ...DEFAULT_RENDER, ...(k.settings || {}), ...patch };
+      const settings = isDefaultSettings(merged) ? null : merged;
+      // Default reverts to the preview URL if the sound has one; custom (or no preview)
+      // clears it until an on-demand render (Render button / auto on add).
+      const url = (!settings && k.previewUrl) ? k.previewUrl : null;
+      return { ...k, settings, url, rendering: false };
+    }));
+  };
+
+  const renderKitEntry = useCallback(async (entry) => {
+    if (!entry) return;
+    const s = entry.settings || {};
+    setKit((prev) => prev.map((k) => (k.name === entry.name ? { ...k, rendering: true } : k)));
+    try {
+      const duration = s.duration ?? entry.duration ?? 2;
+      const url = await renderToWavUrl(entry.soundId, entry.evoRunId, {
+        duration,
+        noteDelta: s.noteDelta ?? 0,
+        velocity: s.velocity ?? 1,
+      });
+      setKit((prev) => prev.map((k) => (k.name === entry.name ? { ...k, url, rendering: false } : k)));
+      flash(`Rendered ${entry.name}`);
+    } catch (e) {
+      setKit((prev) => prev.map((k) => (k.name === entry.name ? { ...k, rendering: false } : k)));
+      flash(`Render failed: ${(e.message || '').slice(0, 90)}`);
+    }
+  }, [flash]);
+
+  const copyToken = async (name) => {
+    const token = `s("${name}")`;
+    try { await navigator.clipboard.writeText(token); flash(`Copied ${token}`); }
+    catch { flash(`Type: ${token}`); }
+  };
+
+  // --- audition (independent of Strudel; always the preview) ---
+  const audition = async (sound) => {
+    const a = auditionRef.current;
+    if (!a) return;
+    if (auditionId === sound.id) { a.pause(); setAuditionId(null); return; }
+
+    const playUrl = (url) => { a.src = url; return a.play().then(() => setAuditionId(sound.id)); };
+    const render = async () => {
+      flash(`Rendering ${sound.label}…`);
+      const url = await renderToWavUrl(sound.id, getEvoRunId(sound), { duration: sound.duration ?? 2, noteDelta: 0, velocity: 1 });
+      return playUrl(url);
+    };
+    try {
+      // Prefer the pre-rendered preview (instant); fall back to a render if it fails
+      // or the sound has no preview.
+      if (sound.previewUrl) await playUrl(sound.previewUrl).catch(() => render());
+      else await render();
+    } catch (e) {
+      flash(`Could not play: ${(e.message || '').slice(0, 80)}`);
+    }
+  };
+
+  // --- trajectory ---
+  const handleEval = useCallback((code) => {
+    setTrajectory((prev) => appendSnapshot(prev, makeSnapshot(code, kit)));
+    setScrubIndex(null);
+  }, [kit]);
+
+  const scrubTo = (idx) => {
+    const snap = trajectory[idx];
+    if (!snap) return;
+    setScrubIndex(idx);
+    padRef.current?.setCode(snap.code);
+    // Blob URLs from a past session are gone; revert to preview (custom keys re-render on demand).
+    setKit((snap.kit || []).map((k) => ({ ...k, settings: k.settings || null, url: k.previewUrl, rendering: false })));
+  };
+
+  // --- save / open ---
+  const requireAuth = () => { if (!user) { setShowLogin(true); return false; } return true; };
+
+  const handleSave = async (meta) => {
+    if (!requireAuth()) return;
+    try {
+      // Don't persist ephemeral blob URLs or transient flags.
+      const cleanKit = kit.map(({ url, rendering, ...rest }) => rest);
+      const state = { environment: 'strudel', code: padRef.current?.getCode() || '', kit: cleanKit, trajectory };
+      const saved = await api.createSequence({ ...meta, state });
+      setShowSave(false);
+      flash(`Saved "${saved.title || meta.title}"`);
+    } catch (err) {
+      flash(err.message?.slice(0, 120) || 'Save failed');
+    }
+  };
+
+  const handleOpen = (seq) => {
+    const st = seq.unitState || {};
+    setKit((Array.isArray(st.kit) ? st.kit : []).map((k) => ({ ...k, url: k.previewUrl, rendering: false })));
+    setTrajectory(Array.isArray(st.trajectory) ? st.trajectory : []);
+    setScrubIndex(null);
+    padRef.current?.setCode(st.code || '');
+    setShowOpen(false);
+    flash(`Opened "${seq.title}"`);
+  };
+
+  // --- Ableton ---
+  const sendStems = () => {
+    if (!kit.length) { flash('Add sounds to the kit first'); return; }
+    const ok = sendToLive(buildStemsSelection(kit));
+    if (!ok) flash('Not running inside Live — payload logged to console');
+  };
+  const runBounce = async (seconds) => {
+    try {
+      flash('Bouncing…');
+      const { wav, durationSecs } = await bounceToWav({ padRef, seconds });
+      const wavBase64 = bytesToBase64(wav);
+      const ok = sendToLive({
+        version: 1,
+        items: [{ soundId: 'composition', name: 'Composition', duration: durationSecs, wavBase64 }],
+      });
+      // NB: landing this in Live needs the extension's wavBase64 short-circuit
+      // (see docs/ABLETON_BRIDGE.md); stems export works without it.
+      flash(ok ? 'Sent bounce to Live' : 'Not in Live — bounce logged to console');
+    } catch (e) {
+      flash(e.message?.slice(0, 140) || 'Bounce failed');
+    }
+  };
+
+  const env = getEnvironment('strudel');
+  const renderAll = () => {
+    kit.forEach((k) => { if (!k.url && !k.rendering) renderKitEntry(k); });
+  };
+  const insertStarter = () => {
+    padRef.current?.setCode(env.makeStarter(kit));
+    renderAll();
+    flash('Inserted a starter pattern');
+  };
+  const surpriseMe = () => {
+    padRef.current?.setCode(env.makeRandom(kit));
+    renderAll();
+    flash('Surprise!');
+  };
+  const copyPattern = async (text) => {
+    try { await navigator.clipboard.writeText(text); flash('Copied — paste into the editor'); }
+    catch { flash('Copy failed'); }
+  };
+
+  const filtered = query.trim()
+    ? sounds.filter((s) =>
+        (s.label + ' ' + s.id + ' ' + (s.soundType || '')).toLowerCase().includes(query.toLowerCase()))
+    : sounds;
+
+  const openEntry = kit.find((k) => k.name === settingsFor) || null;
+
+  return (
+    <div className="app">
+      <audio ref={auditionRef} onEnded={() => setAuditionId(null)} hidden />
+
+      <header className="topbar">
+        <div className="brand">Synth.is · <span className="brand-accent">Composing</span></div>
+        <a className="btn ghost" href={api.SYNTHIS_APP_URL} title="Back to Synth.is">← Synth.is</a>
+        <div className="spacer" />
+        {ABLETON && (
+          <>
+            <button className="btn ghost" onClick={() => setShowBounce(true)} title="Bounce the composition to one clip">→ Live (bounce)</button>
+            <button className="btn" onClick={sendStems} title="Send kit sounds as stems, with their render settings">→ Live (stems)</button>
+            <span style={{ width: 10 }} />
+          </>
+        )}
+        <button className="btn ghost" onClick={() => setShowOpen(true)} disabled={!user}>Open…</button>
+        <button className="btn" onClick={() => (requireAuth() && setShowSave(true))}>Save</button>
+        {user ? (
+          <div className="auth">
+            <span className="who">{user.displayName || user.username}</span>
+            <button className="btn ghost" onClick={() => { api.logout(); setUser(null); if (source === 'garden') setSource('public'); }}>Sign out</button>
+          </div>
+        ) : (
+          <button className="btn ghost" onClick={() => setShowLogin(true)}>Sign in</button>
+        )}
+      </header>
+
+      <main className="layout">
+        <aside className="sidebar">
+          <div className="source-toggle">
+            <button className={source === 'public' ? 'seg active' : 'seg'} onClick={() => chooseSource('public')}>Community</button>
+            <button className={source === 'garden' ? 'seg active' : 'seg'} onClick={() => chooseSource('garden')}>My garden</button>
+          </div>
+          <input className="search" placeholder="Filter sounds…" value={query} onChange={(e) => setQuery(e.target.value)} />
+          <div className="sound-list">
+            {loadingSounds && <div className="muted">Loading…</div>}
+            {soundsError && <div className="error">{soundsError}</div>}
+            {!loadingSounds && !soundsError && filtered.length === 0 && <div className="muted">No sounds.</div>}
+            {filtered.map((s) => (
+              <div className="sound-row" key={s.id}>
+                <button className={auditionId === s.id ? 'aud playing' : 'aud'} title="Audition preview" onClick={() => audition(s)}>
+                  {auditionId === s.id ? '❚❚' : '▶'}
+                </button>
+                <div className="sound-meta" title={s.id}>
+                  <div className="sound-label">{s.label}</div>
+                  <div className="sound-sub">{s.soundType || s.class || '—'}</div>
+                </div>
+                <button className="btn tiny" title="Add to kit" onClick={() => addToKit(s)}>+ kit</button>
+              </div>
+            ))}
+          </div>
+        </aside>
+
+        <section className="workspace">
+          <div className="kit">
+            <div className="kit-head">
+              <span>Kit ({kit.length})</span>
+              <span className="muted small">click a name to copy · ⚙ for render settings</span>
+            </div>
+            <div className="kit-chips">
+              {kit.length === 0 && <span className="muted">Add sounds to register them as Strudel samples.</span>}
+              {kit.map((k) => {
+                const custom = !isDefaultSettings(k.settings);
+                const marker = k.rendering ? '⋯ ' : !k.url ? '○ ' : custom ? '● ' : '';
+                return (
+                  <span className="chip" key={k.name}>
+                    <button className="chip-name" title='Copy s("name")' onClick={() => copyToken(k.name)}>
+                      {marker}{k.name}
+                    </button>
+                    <button className="chip-x" title="Render settings" onClick={() => setSettingsFor(settingsFor === k.name ? null : k.name)}>⚙</button>
+                    <button className="chip-x" title="Remove" onClick={() => removeFromKit(k.name)}>×</button>
+                  </span>
+                );
+              })}
+            </div>
+
+            {openEntry && (
+              <SettingsPanel
+                entry={openEntry}
+                onChange={(patch) => updateKitSettings(openEntry.name, patch)}
+                onReset={() => updateKitSettings(openEntry.name, DEFAULT_RENDER)}
+                onRender={() => renderKitEntry(openEntry)}
+                onClose={() => setSettingsFor(null)}
+              />
+            )}
+          </div>
+
+          {trajectory.length > 0 && (
+            <TrajectoryBar
+              trajectory={trajectory}
+              scrubIndex={scrubIndex}
+              onScrub={scrubTo}
+              onClear={() => { setTrajectory([]); setScrubIndex(null); }}
+            />
+          )}
+
+          <HintsBar
+            env={env}
+            kit={kit}
+            onInsertStarter={insertStarter}
+            onSurprise={surpriseMe}
+            onCopy={copyPattern}
+          />
+
+          <StrudelPad ref={padRef} getKitMap={getKitMap} onEval={handleEval} />
+        </section>
+      </main>
+
+      {status && <div className="toast">{status}</div>}
+
+      {showLogin && <LoginDialog onClose={() => setShowLogin(false)} onLoggedIn={(u) => { setUser(u); setShowLogin(false); }} />}
+      {showSave && <SaveDialog onClose={() => setShowSave(false)} onSave={handleSave} />}
+      {showOpen && <OpenDialog onClose={() => setShowOpen(false)} onOpen={handleOpen} />}
+      {showBounce && (
+        <BounceDialog
+          cps={padRef.current?.getCps?.()}
+          onClose={() => setShowBounce(false)}
+          onBounce={(secs) => { setShowBounce(false); runBounce(secs); }}
+        />
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+function HintsBar({ env, kit, onInsertStarter, onSurprise, onCopy }) {
+  const hints = env.hints(kit);
+  return (
+    <div className="hints">
+      <div className="hints-head">
+        <span className="muted small">
+          Tip: only the <em>last</em> expression plays — combine sounds with <code>stack(a, b)</code> or a <code>"a b"</code> sequence.
+        </span>
+        <span className="spacer" />
+        <a className="hints-doc" href={env.docsUrl} target="_blank" rel="noopener noreferrer">{env.label} guide ↗</a>
+      </div>
+      <div className="hints-actions">
+        <button className="btn tiny" onClick={onInsertStarter}>Insert starter</button>
+        <button className="btn tiny ghost" onClick={onSurprise}>Surprise me</button>
+        <span className="hints-sep" />
+        {hints.map((h) => (
+          <button key={h.label} className="hint-chip" title={`Copy: ${h.code}`} onClick={() => onCopy(h.code)}>{h.label}</button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SettingsPanel({ entry, onChange, onReset, onRender, onClose }) {
+  const s = entry.settings || {};
+  const numOrNull = (v) => (v === '' ? null : Number(v));
+  const custom = !isDefaultSettings(entry.settings);
+  const rendered = custom && entry.url && entry.url !== entry.previewUrl;
+  return (
+    <div className="settings-panel">
+      <div className="settings-title">
+        Render settings — <code>{entry.name}</code>
+      </div>
+      <div className="muted small" style={{ marginBottom: 8 }}>
+        Custom settings render the genome on demand so they’re audible in Strudel. Add the
+        same sound again for a second key at different settings. They also flow to “→ Live (stems)”.
+      </div>
+      <div className="settings-grid">
+        <label className="field">Duration (s)
+          <input type="number" step="0.5" min="0.1" placeholder="preview"
+            value={s.duration ?? ''} onChange={(e) => onChange({ duration: numOrNull(e.target.value) })} />
+        </label>
+        <label className="field">Pitch (semitones)
+          <input type="number" step="1" value={s.noteDelta ?? 0} onChange={(e) => onChange({ noteDelta: Number(e.target.value) })} />
+        </label>
+        <label className="field">Velocity (0–1)
+          <input type="number" step="0.1" min="0" max="1" value={s.velocity ?? 1} onChange={(e) => onChange({ velocity: Number(e.target.value) })} />
+        </label>
+      </div>
+      <div className="settings-actions">
+        <span className="muted small">
+          {entry.rendering ? 'rendering…' : entry.url ? 'rendered ✓' : 'not rendered — click Render'}
+        </span>
+        <span className="spacer" />
+        <button className="btn tiny ghost" onClick={onReset}>Reset</button>
+        <button className="btn tiny" onClick={onRender} disabled={entry.rendering}>Render</button>
+        <button className="btn tiny ghost" onClick={onClose}>Done</button>
+      </div>
+    </div>
+  );
+}
+
+function TrajectoryBar({ trajectory, scrubIndex, onScrub, onClear }) {
+  const maxIdx = trajectory.length - 1;
+  const value = scrubIndex ?? maxIdx;
+  const snap = trajectory[value];
+  const first = trajectory[0];
+  return (
+    <div className="trajectory">
+      <div className="trajectory-head">
+        <span>Trajectory ({trajectory.length})</span>
+        <span className="muted small">{snap ? snapshotLabel(snap, value, first) : ''}{scrubIndex != null ? ' · replaying' : ' · live'}</span>
+        <span className="spacer" />
+        <button className="btn tiny ghost" onClick={onClear}>Clear</button>
+      </div>
+      <input
+        className="trajectory-slider"
+        type="range"
+        min={0}
+        max={Math.max(0, maxIdx)}
+        value={value}
+        onChange={(e) => onScrub(Number(e.target.value))}
+        disabled={trajectory.length < 2}
+      />
+    </div>
+  );
+}
+
+function LoginDialog({ onClose, onLoggedIn }) {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const submit = async () => {
+    setBusy(true); setError('');
+    const r = await api.login(email.trim(), password);
+    setBusy(false);
+    if (r.success) onLoggedIn(r.user); else setError(r.error || 'Login failed');
+  };
+  return (
+    <Modal title="Sign in to Synth.is" onClose={onClose}>
+      <p className="muted small">Only needed for your garden and to save compositions.</p>
+      <label className="field">Email
+        <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoFocus />
+      </label>
+      <label className="field">Password
+        <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && submit()} />
+      </label>
+      {error && <div className="error">{error}</div>}
+      <div className="modal-actions">
+        <button className="btn ghost" onClick={onClose}>Cancel</button>
+        <button className="btn" onClick={submit} disabled={busy || !email || !password}>{busy ? 'Signing in…' : 'Sign in'}</button>
+      </div>
+    </Modal>
+  );
+}
+
+function SaveDialog({ onClose, onSave }) {
+  const [title, setTitle] = useState('');
+  const [description, setDescription] = useState('');
+  const [visibility, setVisibility] = useState('private');
+  return (
+    <Modal title="Save composition" onClose={onClose}>
+      <label className="field">Title
+        <input value={title} onChange={(e) => setTitle(e.target.value)} autoFocus placeholder="Untitled composition" />
+      </label>
+      <label className="field">Description
+        <textarea rows={2} value={description} onChange={(e) => setDescription(e.target.value)} />
+      </label>
+      <label className="field">Visibility
+        <select value={visibility} onChange={(e) => setVisibility(e.target.value)}>
+          <option value="private">Private</option>
+          <option value="public">Public</option>
+        </select>
+      </label>
+      <div className="modal-actions">
+        <button className="btn ghost" onClick={onClose}>Cancel</button>
+        <button className="btn" onClick={() => onSave({ title, description, visibility, tags: [] })}>Save</button>
+      </div>
+    </Modal>
+  );
+}
+
+function OpenDialog({ onClose, onOpen }) {
+  const [items, setItems] = useState(null);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    api.listMySequences().then(setItems).catch((e) => { setError(e.message || 'Failed to load'); setItems([]); });
+  }, []);
+  return (
+    <Modal title="Open composition" onClose={onClose}>
+      {items === null && <div className="muted">Loading…</div>}
+      {error && <div className="error">{error}</div>}
+      {items && items.length === 0 && !error && <div className="muted">No saved compositions yet.</div>}
+      <div className="open-list">
+        {items?.map((s) => (
+          <button className="open-row" key={s.id} onClick={() => onOpen(s)}>
+            <span className="open-title">{s.title || 'Untitled'}</span>
+            <span className="open-sub">{(s.soundIds?.length || 0)} sounds · {s.visibility}</span>
+          </button>
+        ))}
+      </div>
+      <div className="modal-actions">
+        <button className="btn ghost" onClick={onClose}>Close</button>
+      </div>
+    </Modal>
+  );
+}
+
+function BounceDialog({ cps, onClose, onBounce }) {
+  const hasCps = typeof cps === 'number' && cps > 0;
+  const [cycles, setCycles] = useState(4);
+  const [seconds, setSeconds] = useState(8);
+  const secs = hasCps ? cycles / cps : seconds;
+  return (
+    <Modal title="Bounce composition to Live" onClose={onClose}>
+      <p className="muted small">
+        Records the live Strudel output in real time, then sends it to Live as one audio clip.
+      </p>
+      {hasCps ? (
+        <>
+          <label className="field">Length (cycles)
+            <input type="number" min="1" step="1" value={cycles}
+              onChange={(e) => setCycles(Math.max(1, Number(e.target.value) || 1))} autoFocus />
+          </label>
+          <div className="muted small" style={{ marginBottom: 12 }}>
+            ≈ {secs.toFixed(2)} s at the current tempo (cps {cps.toFixed(3)}). A whole number of cycles loops cleanly in Live.
+          </div>
+        </>
+      ) : (
+        <label className="field">Length (seconds)
+          <input type="number" min="1" step="1" value={seconds}
+            onChange={(e) => setSeconds(Math.max(1, Number(e.target.value) || 1))} autoFocus />
+        </label>
+      )}
+      <div className="modal-actions">
+        <button className="btn ghost" onClick={onClose}>Cancel</button>
+        <button className="btn" onClick={() => onBounce(secs)}>Bounce &amp; send</button>
+      </div>
+    </Modal>
+  );
+}
+
+function Modal({ title, children, onClose }) {
+  return (
+    <div className="modal-backdrop" onMouseDown={onClose}>
+      <div className="modal" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="modal-head">{title}</div>
+        <div className="modal-body">{children}</div>
+      </div>
+    </div>
+  );
+}

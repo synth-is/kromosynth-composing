@@ -1,0 +1,24 @@
+{
+  "name": "kromosynth-composing",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Standalone live-coding companion for Synth.is — load evolved sounds into livecoding environments (Strudel first) and save compositions to a Synth.is account.",
+  "license": "AGPL-3.0-or-later",
+  "scripts": {
+    "dev": "vite --host",
+    "start": "vite --host --mode production-local",
+    "build": "vite build --mode production-local",
+    "preview": "vite preview --host"
+  },
+  "dependencies": {
+    "@strudel/repl": "^1.3.0",
+    "@strudel/webaudio": "^1.3.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.3",
+    "vite": "^5.4.10"
+  }
+}

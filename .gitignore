@@ -1,0 +1,11 @@
+node_modules
+dist
+dist-ssr
+.DS_Store
+.vite
+
+# Env: personal/secret overrides are ignored; committed ones (.env.example,
+# .env.production-local) are intentionally tracked so a clone can `npm start`.
+.env
+.env.local
+.env.*.local
