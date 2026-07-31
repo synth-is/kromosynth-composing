@@ -142,6 +142,42 @@ export function resolvePreviewUrl(node) {
   return `${RECOMMEND_URL}${raw.startsWith('/') ? '' : '/'}${raw}`;
 }
 
+function normalizeDate(val) {
+  if (val == null) return null;
+  if (typeof val === 'number') return new Date(val).toISOString();
+  const d = new Date(val);
+  return isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+// ULIDs encode a 48-bit millisecond timestamp in their first 10 Crockford-base32
+// characters, so we can date a sound from its id even when creation_date is absent.
+const CROCKFORD32 = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+export function ulidToIso(id) {
+  if (typeof id !== 'string' || id.length < 10) return null;
+  const t = id.slice(0, 10).toUpperCase();
+  let ms = 0;
+  for (let i = 0; i < 10; i++) {
+    const v = CROCKFORD32.indexOf(t[i]);
+    if (v < 0) return null; // not a ULID
+    ms = ms * 32 + v;
+  }
+  // plausibility guard: between 2015-01-01 and now + 1 day
+  if (ms < 1420070400000 || ms > Date.now() + 86400000) return null;
+  return new Date(ms).toISOString();
+}
+
+/** Compact human summary of the perceptual descriptors, e.g. "bright, tonal, loud". */
+function descriptorSummary(node) {
+  const parts = [];
+  const add = (v, skip) => { if (v && v !== skip) parts.push(v); };
+  add(pick(node, 'descriptor_brightness', 'descriptorBrightness'), 'neutral');
+  add(pick(node, 'descriptor_noisiness', 'descriptorNoisiness'), 'mixed');
+  add(pick(node, 'descriptor_energy', 'descriptorEnergy'), 'moderate');
+  add(pick(node, 'descriptor_richness', 'descriptorRichness'), 'moderate');
+  add(pick(node, 'descriptor_width', 'descriptorWidth'), 'moderate');
+  return parts.length ? parts.join(', ') : null;
+}
+
 function normalizeSound(node) {
   const id = pick(node, 'id');
   const name = pick(node, 'name');
@@ -154,9 +190,68 @@ function normalizeSound(node) {
     soundType: soundType || null,
     class: klass || null,
     duration: pick(node, 'duration') || null,
+    generation: pick(node, 'generation_number', 'generation') || 0,
+    createdAt: normalizeDate(pick(node, 'creation_date', 'createdAt')) || ulidToIso(id),
+    descriptors: descriptorSummary(node),
     previewUrl: resolvePreviewUrl(node),
     raw: node,
   };
+}
+
+/** Resolve a spectrogram `image` value (data URL, absolute URL, or path) to a URL. */
+export function resolveSpecImage(img) {
+  if (!img) return null;
+  if (img.startsWith('data:') || /^https?:\/\//i.test(img)) return img;
+  if (img.startsWith('/')) return `${RECOMMEND_URL}${img}`;
+  return `${RECOMMEND_URL}/api/spectrograms/file/${img}`;
+}
+
+// Spectrogram PNGs (from the recommend service), cached per sound for the session.
+const _specCache = new Map();
+export async function fetchSpectrogramUrl(soundId) {
+  if (_specCache.has(soundId)) return _specCache.get(soundId);
+  let url = null;
+  try {
+    const res = await fetch(`${RECOMMEND_URL}/api/spectrograms/${encodeURIComponent(soundId)}`);
+    if (res.ok) url = resolveSpecImage((await res.json())?.image);
+  } catch { /* ignore */ }
+  _specCache.set(soundId, url);
+  return url;
+}
+
+// Semantic (embedding) search encoders. clap covers the broadest corpus; the
+// others are backfilled over the adopted pool only.
+export const SEARCH_ENCODERS = [
+  { id: 'clap', label: 'CLAP' },
+  { id: 'mga_clap', label: 'MGA-CLAP' },
+  { id: 'languagebind', label: 'LanguageBind' },
+];
+
+function normalizeSearchEntry(entry) {
+  const s = normalizeSound(entry.sound || {});
+  return { ...s, similarity: entry.similarity ?? null, spec: resolveSpecImage(entry.spectrogram?.image) };
+}
+
+async function embeddingSearch(query, { encoder = 'clap', topK = 48 } = {}) {
+  const res = await fetch(`${RECOMMEND_URL}/api/exploration/search/embedding`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, encoder, mode: 'similar', topK }),
+  });
+  if (!res.ok) throw new Error((await res.text().catch(() => '')) || `Search failed (HTTP ${res.status})`);
+  const data = await res.json().catch(() => ({}));
+  const list = Array.isArray(data?.data) ? data.data : [];
+  return list.map(normalizeSearchEntry).filter((s) => s.id);
+}
+
+/** Semantic search: a text query → sounds ranked by the chosen encoder's similarity. */
+export function semanticSearch(text, opts) {
+  return embeddingSearch({ kind: 'text', text }, opts);
+}
+
+/** "More like this": rank sounds by similarity to an existing sound's own vector. */
+export function similarToSound(soundId, opts) {
+  return embeddingSearch({ kind: 'sound', soundId }, opts);
 }
 
 async function fetchGraph(url) {

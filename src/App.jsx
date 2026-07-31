@@ -10,6 +10,51 @@ import { getEnvironment } from './lib/environments.js';
 
 const ABLETON = isAbletonHost();
 
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+/** Group sounds into month buckets (newest first; undated last) for a navigable list. */
+function groupByMonth(sounds) {
+  const map = new Map();
+  for (const s of sounds) {
+    let key = 'undated';
+    let label = 'Undated';
+    if (s.createdAt) {
+      const d = new Date(s.createdAt);
+      if (!isNaN(d.getTime())) {
+        key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+        label = `${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
+      }
+    }
+    if (!map.has(key)) map.set(key, { key, label, items: [] });
+    map.get(key).items.push(s);
+  }
+  const groups = [...map.values()];
+  groups.sort((a, b) => {
+    if (a.key === 'undated') return 1;
+    if (b.key === 'undated') return -1;
+    return a.key < b.key ? 1 : a.key > b.key ? -1 : 0;
+  });
+  return groups;
+}
+
+/** Group by sound type/role (always present; the most navigable default for picking). */
+function groupByType(sounds) {
+  const map = new Map();
+  for (const s of sounds) {
+    const key = String(s.soundType || s.class || 'other').toLowerCase();
+    const label = key.charAt(0).toUpperCase() + key.slice(1);
+    if (!map.has(key)) map.set(key, { key, label, items: [] });
+    map.get(key).items.push(s);
+  }
+  const groups = [...map.values()];
+  groups.sort((a, b) => (b.items.length - a.items.length) || a.label.localeCompare(b.label));
+  return groups;
+}
+
+function groupSounds(sounds, mode) {
+  return mode === 'month' ? groupByMonth(sounds) : groupByType(sounds);
+}
+
 export default function App() {
   const padRef = useRef(null);
   const auditionRef = useRef(null);
@@ -20,6 +65,11 @@ export default function App() {
   const [loadingSounds, setLoadingSounds] = useState(false);
   const [soundsError, setSoundsError] = useState('');
   const [query, setQuery] = useState('');
+  const [groupMode, setGroupMode] = useState('month'); // 'month' | 'type' — dates decoded from ULIDs
+  const [encoder, setEncoder] = useState('clap');
+  const [searchResults, setSearchResults] = useState(null); // null = browse; array = semantic results
+  const [searching, setSearching] = useState(false);
+  const [searchDesc, setSearchDesc] = useState(''); // what the current results are for (header)
   // kit entry: { name, soundId, evoRunId, previewUrl, url, duration, label, settings, rendering }
   const [kit, setKit] = useState([]);
   const [settingsFor, setSettingsFor] = useState(null);
@@ -69,6 +119,7 @@ export default function App() {
       }
     }
     if (source === 'garden' && !user) return;
+    if (source === 'search') return; // results come from runSearch, not this loader
     load();
     return () => { cancelled = true; };
   }, [source, user]);
@@ -257,9 +308,43 @@ export default function App() {
     catch { flash('Copy failed'); }
   };
 
+  const runSearch = async () => {
+    const q = query.trim();
+    if (q.length < 2) { flash('Type at least 2 characters'); return; }
+    setSearchDesc(q);
+    setSearching(true);
+    try {
+      const results = await api.semanticSearch(q, { encoder, topK: 48 });
+      setSearchResults(results);
+      if (!results.length) flash('No matches');
+    } catch (e) {
+      setSearchResults([]);
+      flash(`Search failed: ${(e.message || '').slice(0, 90)}`);
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  const findSimilar = async (sound) => {
+    setSource('search');
+    setQuery('');
+    setSearchDesc(`≈ ${sound.descriptors || sound.label}`);
+    setSearching(true);
+    try {
+      const results = await api.similarToSound(sound.id, { encoder, topK: 48 });
+      setSearchResults(results);
+      if (!results.length) flash('No similar sounds found');
+    } catch (e) {
+      setSearchResults([]);
+      flash(`Search failed: ${(e.message || '').slice(0, 90)}`);
+    } finally {
+      setSearching(false);
+    }
+  };
+
   const filtered = query.trim()
     ? sounds.filter((s) =>
-        (s.label + ' ' + s.id + ' ' + (s.soundType || '')).toLowerCase().includes(query.toLowerCase()))
+        (s.label + ' ' + s.id + ' ' + (s.soundType || '') + ' ' + (s.descriptors || '')).toLowerCase().includes(query.toLowerCase()))
     : sounds;
 
   const openEntry = kit.find((k) => k.name === settingsFor) || null;
@@ -296,24 +381,85 @@ export default function App() {
           <div className="source-toggle">
             <button className={source === 'public' ? 'seg active' : 'seg'} onClick={() => chooseSource('public')}>Community</button>
             <button className={source === 'garden' ? 'seg active' : 'seg'} onClick={() => chooseSource('garden')}>My garden</button>
+            <button className={source === 'search' ? 'seg active' : 'seg'} onClick={() => chooseSource('search')}>Search</button>
           </div>
-          <input className="search" placeholder="Filter sounds…" value={query} onChange={(e) => setQuery(e.target.value)} />
-          <div className="sound-list">
-            {loadingSounds && <div className="muted">Loading…</div>}
-            {soundsError && <div className="error">{soundsError}</div>}
-            {!loadingSounds && !soundsError && filtered.length === 0 && <div className="muted">No sounds.</div>}
-            {filtered.map((s) => (
-              <div className="sound-row" key={s.id}>
-                <button className={auditionId === s.id ? 'aud playing' : 'aud'} title="Audition preview" onClick={() => audition(s)}>
-                  {auditionId === s.id ? '❚❚' : '▶'}
-                </button>
-                <div className="sound-meta" title={s.id}>
-                  <div className="sound-label">{s.label}</div>
-                  <div className="sound-sub">{s.soundType || s.class || '—'}</div>
-                </div>
-                <button className="btn tiny" title="Add to kit" onClick={() => addToKit(s)}>+ kit</button>
+          {source === 'search' ? (
+            <>
+              <input
+                className="search"
+                placeholder="Describe a sound… (e.g. warm pad)"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && runSearch()}
+              />
+              <div className="group-by">
+                <span className="muted small">Model</span>
+                <select value={encoder} onChange={(e) => setEncoder(e.target.value)}>
+                  {api.SEARCH_ENCODERS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+                </select>
+                <span className="spacer" />
+                <button className="btn tiny" onClick={runSearch} disabled={searching}>{searching ? 'Searching…' : 'Search'}</button>
               </div>
-            ))}
+            </>
+          ) : (
+            <>
+              <input className="search" placeholder="Filter sounds…" value={query} onChange={(e) => setQuery(e.target.value)} />
+              <div className="group-by">
+                <span className="muted small">Group by</span>
+                <select value={groupMode} onChange={(e) => setGroupMode(e.target.value)}>
+                  <option value="type">Type</option>
+                  <option value="month">Month</option>
+                </select>
+              </div>
+            </>
+          )}
+          <div className="sound-list">
+            {source === 'search' ? (
+              <>
+                {searching && <div className="muted" style={{ padding: 10 }}>Searching…</div>}
+                {searchResults === null && !searching && (
+                  <div className="muted" style={{ padding: 10 }}>Describe a sound and press Search to find matches by meaning across the platform.</div>
+                )}
+                {searchResults && searchResults.length === 0 && !searching && <div className="muted" style={{ padding: 10 }}>No matches.</div>}
+                {searchResults && searchResults.length > 0 && (
+                  <div className="sound-group">
+                    <div className="sound-group-head">Results{searchDesc ? ` · ${searchDesc}` : ''} <span className="muted">· {searchResults.length}</span></div>
+                    {searchResults.map((s) => (
+                      <SoundCard
+                        key={s.id}
+                        sound={s}
+                        initialSpec={s.spec}
+                        playing={auditionId === s.id}
+                        onAudition={() => audition(s)}
+                        onAdd={() => addToKit(s)}
+                        onFindSimilar={() => findSimilar(s)}
+                      />
+                    ))}
+                  </div>
+                )}
+              </>
+            ) : (
+              <>
+                {loadingSounds && <div className="muted">Loading…</div>}
+                {soundsError && <div className="error">{soundsError}</div>}
+                {!loadingSounds && !soundsError && filtered.length === 0 && <div className="muted">No sounds.</div>}
+                {groupSounds(filtered, groupMode).map((g) => (
+                  <div className="sound-group" key={g.key}>
+                    <div className="sound-group-head">{g.label} <span className="muted">· {g.items.length}</span></div>
+                    {g.items.map((s) => (
+                      <SoundCard
+                        key={s.id}
+                        sound={s}
+                        playing={auditionId === s.id}
+                        onAudition={() => audition(s)}
+                        onAdd={() => addToKit(s)}
+                        onFindSimilar={() => findSimilar(s)}
+                      />
+                    ))}
+                  </div>
+                ))}
+              </>
+            )}
           </div>
         </aside>
 
@@ -390,6 +536,51 @@ export default function App() {
 
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
+function SoundCard({ sound, playing, onAudition, onAdd, initialSpec, onFindSimilar }) {
+  const ref = useRef(null);
+  const [spec, setSpec] = useState(initialSpec ?? undefined); // undefined = not fetched, null = none, string = url
+
+  useEffect(() => {
+    if (initialSpec) return; // provided inline (e.g. search results)
+    const el = ref.current;
+    if (!el) return;
+    let done = false;
+    // Lazy-load the spectrogram only when the card nears the viewport (gentle on the API).
+    const io = new IntersectionObserver((entries) => {
+      if (entries[0]?.isIntersecting && !done) {
+        done = true;
+        io.disconnect();
+        api.fetchSpectrogramUrl(sound.id).then(setSpec).catch(() => setSpec(null));
+      }
+    }, { rootMargin: '250px' });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [sound.id, initialSpec]);
+
+  const dur = sound.duration ? `${Number(sound.duration).toFixed(1)}s` : null;
+  const sub = [sound.soundType || sound.class, dur].filter(Boolean).join(' · ');
+  const title = sound.descriptors || sound.label;
+
+  return (
+    <div className="sound-card" ref={ref} title={sound.id}>
+      <button className="spec-wrap" onClick={onAudition} title="Audition">
+        {spec
+          ? <img className="spec-img" src={spec} alt="" loading="lazy" />
+          : <div className={`spec-ph${spec === undefined ? ' loading' : ''}`} />}
+        <span className="spec-play">{playing ? '❚❚' : '▶'}</span>
+      </button>
+      <div className="sound-card-row">
+        <div className="sound-card-meta">
+          <div className="sound-label">{title}</div>
+          {sub && <div className="sound-sub">{sub}</div>}
+        </div>
+        {onFindSimilar && <button className="btn tiny ghost" title="Find similar sounds" onClick={onFindSimilar}>≈</button>}
+        <button className="btn tiny" title="Add to kit" onClick={onAdd}>+ kit</button>
+      </div>
+    </div>
+  );
+}
+
 function HintsBar({ env, kit, onInsertStarter, onSurprise, onCopy }) {
   const hints = env.hints(kit);
   return (
