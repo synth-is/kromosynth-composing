@@ -139,6 +139,14 @@ body {
 .trajectory { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
 .trajectory-head { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; margin-bottom: 8px; }
 .trajectory-slider { width: 100%; accent-color: var(--accent-2); }
+.trajectory-steps { display: flex; flex-wrap: wrap; gap: 4px; max-height: 88px; overflow-y: auto; }
+.traj-step { display: inline-flex; align-items: center; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: var(--panel-2); }
+.traj-step.active { border-color: var(--accent-2); }
+.traj-step-jump { background: transparent; border: none; color: var(--text); font-size: 12px; padding: 3px 8px; cursor: pointer; line-height: 1.4; }
+.traj-step-jump:hover { background: var(--panel); }
+.traj-step.active .traj-step-jump { color: var(--accent-2); font-weight: 600; }
+.traj-step-x { background: transparent; border: none; border-left: 1px solid var(--border); color: var(--muted); font-size: 12px; padding: 3px 6px; cursor: pointer; line-height: 1.4; }
+.traj-step-x:hover { color: #e5646b; background: var(--panel); }
 
 /* hints / authoring help */
 .hints { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px; }

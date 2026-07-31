@@ -239,6 +239,17 @@ export default function App() {
     setKit((snap.kit || []).map((k) => ({ ...k, settings: k.settings || null, url: k.previewUrl, rendering: false })));
   };
 
+  const removeSnapshot = (idx) => {
+    setTrajectory((prev) => prev.filter((_, i) => i !== idx));
+    setScrubIndex((si) => {
+      const newLen = trajectory.length - 1; // length before this removal
+      if (newLen <= 0) return null;         // emptied → back to live
+      if (si == null) return null;          // was live; new latest becomes current
+      const n = idx < si ? si - 1 : si;     // shift left if a prior step was removed
+      return Math.max(0, Math.min(n, newLen - 1));
+    });
+  };
+
   // --- save / open ---
   const requireAuth = () => { if (!user) { setShowLogin(true); return false; } return true; };
 
@@ -502,6 +513,7 @@ export default function App() {
               trajectory={trajectory}
               scrubIndex={scrubIndex}
               onScrub={scrubTo}
+              onRemove={removeSnapshot}
               onClear={() => { setTrajectory([]); setScrubIndex(null); }}
             />
           )}
@@ -643,7 +655,7 @@ function SettingsPanel({ entry, onChange, onReset, onRender, onClose }) {
   );
 }
 
-function TrajectoryBar({ trajectory, scrubIndex, onScrub, onClear }) {
+function TrajectoryBar({ trajectory, scrubIndex, onScrub, onRemove, onClear }) {
   const maxIdx = trajectory.length - 1;
   const value = scrubIndex ?? maxIdx;
   const snap = trajectory[value];
@@ -656,15 +668,14 @@ function TrajectoryBar({ trajectory, scrubIndex, onScrub, onClear }) {
         <span className="spacer" />
         <button className="btn tiny ghost" onClick={onClear}>Clear</button>
       </div>
-      <input
-        className="trajectory-slider"
-        type="range"
-        min={0}
-        max={Math.max(0, maxIdx)}
-        value={value}
-        onChange={(e) => onScrub(Number(e.target.value))}
-        disabled={trajectory.length < 2}
-      />
+      <div className="trajectory-steps">
+        {trajectory.map((s, i) => (
+          <span key={`${s.t}-${i}`} className={i === value ? 'traj-step active' : 'traj-step'}>
+            <button className="traj-step-jump" title={snapshotLabel(s, i, first)} onClick={() => onScrub(i)}>{i + 1}</button>
+            <button className="traj-step-x" title="Remove this step" onClick={() => onRemove(i)}>×</button>
+          </span>
+        ))}
+      </div>
     </div>
   );
 }
