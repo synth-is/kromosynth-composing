@@ -196,3 +196,5 @@ body {
   border-radius: 6px; padding: 3px 6px; font: inherit; font-size: 12px;
 }
 .group-by select:focus { outline: none; border-color: var(--accent-2); }
+
+.current-seq { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.85; }

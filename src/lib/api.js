@@ -18,9 +18,16 @@ export const AUTH_URL =
 export const SYNTHIS_APP_URL =
   import.meta.env.VITE_SYNTHIS_APP_URL || 'http://localhost:5173';
 
-// Marks our sequences so they don't collide with Biomes' tree-bound ones,
-// while still living in the same account and /api/user/sequences store.
-export const UNIT_TYPE = 'STRUDEL_STANDALONE';
+// Marks our compositions so they don't collide with Biomes' tree-bound units,
+// while still living in the same account and /api/user/sequences store. The type
+// is engine-agnostic (Strudel now, Csound/WebChucK later) — the specific engine
+// lives in unitConfig.environment. 'STRUDEL_STANDALONE' is the legacy key, still
+// recognised on read so earlier saves keep working.
+export const UNIT_TYPE = 'COMPOSITION';
+export const COMPOSING_UNIT_TYPES = [UNIT_TYPE, 'STRUDEL_STANDALONE'];
+export function isComposingUnit(unitType) {
+  return COMPOSING_UNIT_TYPES.includes(unitType);
+}
 
 // ---------------------------------------------------------------------------
 // Session (localStorage keys are shared with the main app for same-origin reuse)
@@ -325,7 +332,7 @@ export async function listMySequences({ limit = 100, offset = 0 } = {}) {
   });
   if (!res.ok) throw new Error(await res.text() || 'Failed to list sequences');
   const list = unwrap(await res.json(), 'sequences');
-  return (Array.isArray(list) ? list : []).filter((s) => s.unitType === UNIT_TYPE);
+  return (Array.isArray(list) ? list : []).filter((s) => isComposingUnit(s.unitType));
 }
 
 export async function getSequence(id) {
@@ -358,12 +365,33 @@ export async function createSequence({ title, description = '', tags = [], visib
   return unwrap(await res.json(), 'sequence');
 }
 
-/** Metadata update only (title/description/tags/visibility) — matches backend. */
+/** Metadata update only (title/description/tags/visibility). */
 export async function updateSequenceMeta(id, { title, description, tags, visibility }) {
   const res = await fetch(`${RECOMMEND_URL}/api/user/sequences/${id}`, {
     method: 'PATCH',
     headers: authHeaders(),
     body: JSON.stringify({ title, description, tags, visibility }),
+  });
+  if (!res.ok) throw new Error(await res.text() || 'Failed to update');
+  return unwrap(await res.json(), 'sequence');
+}
+
+/** Full in-place update: metadata + composition content (backend persists unit_state_json). */
+export async function updateSequence(id, { title, description, tags, visibility, state } = {}) {
+  const body = {};
+  if (title !== undefined) body.title = title;
+  if (description !== undefined) body.description = description;
+  if (tags !== undefined) body.tags = tags;
+  if (visibility !== undefined) body.visibility = visibility;
+  if (state !== undefined) {
+    body.unitState = state;
+    body.unitConfig = { app: 'kromosynth-composing', environment: state.environment || 'strudel', version: 1 };
+    body.soundIds = (state.kit || []).map((k) => k.soundId).filter(Boolean);
+  }
+  const res = await fetch(`${RECOMMEND_URL}/api/user/sequences/${id}`, {
+    method: 'PATCH',
+    headers: authHeaders(),
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(await res.text() || 'Failed to update');
   return unwrap(await res.json(), 'sequence');

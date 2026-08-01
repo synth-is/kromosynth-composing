@@ -144,6 +144,9 @@ const StrudelPad = forwardRef(function StrudelPad({ initialCode = '', getKitMap,
     },
     play: doPlay,
     stop: doStop,
+    // Re-run the current buffer through the editor (re-registers kit samples), so a
+    // freshly re-rendered sound is picked up live without a manual re-Play.
+    reevaluate: () => { if (isPlaying) doPlay(); },
     isReady: () => readyRef.current,
     // cycles-per-second from the scheduler, for loop-aligned bounce lengths.
     getCps: () => {

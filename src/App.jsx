@@ -58,6 +58,7 @@ function groupSounds(sounds, mode) {
 export default function App() {
   const padRef = useRef(null);
   const auditionRef = useRef(null);
+  const replayAfterRenderRef = useRef(false);
 
   const [user, setUser] = useState(null);
   const [source, setSource] = useState('public'); // 'public' | 'garden'
@@ -83,6 +84,10 @@ export default function App() {
   const [showSave, setShowSave] = useState(false);
   const [showOpen, setShowOpen] = useState(false);
   const [showBounce, setShowBounce] = useState(false);
+  const [currentSequence, setCurrentSequence] = useState(null); // { id, title, description, visibility, tags }
+  const [saveInitialTitle, setSaveInitialTitle] = useState('');
+  const [pendingOpenId, setPendingOpenId] = useState(null); // ?seq=<id> deep link
+  const [padReady, setPadReady] = useState(false);
 
   const flash = useCallback((msg) => {
     setStatus(msg);
@@ -91,16 +96,52 @@ export default function App() {
   }, []);
 
   // On load: adopt an SSO token handed off from the main app (#token=…), else
-  // restore any existing same-origin session.
+  // restore any existing same-origin session. Also pick up a ?seq=<id> deep link.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       const adopted = await api.adoptTokenFromHash();
       if (cancelled) return;
       setUser(adopted || api.restoreSession());
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const seq = params.get('seq');
+        if (seq) {
+          setPendingOpenId(seq);
+          params.delete('seq');
+          const qs = params.toString();
+          window.history.replaceState(null, '', window.location.pathname + (qs ? `?${qs}` : '') + window.location.hash);
+        }
+      } catch { /* ignore */ }
     })();
     return () => { cancelled = true; };
   }, []);
+
+  // Open a deep-linked composition once the editor is ready (setCode needs it).
+  useEffect(() => {
+    if (!padReady || !pendingOpenId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const seq = await api.getSequence(pendingOpenId);
+        if (!cancelled && seq) handleOpen(seq);
+      } catch (e) {
+        if (!cancelled) flash(`Couldn't open that composition: ${(e.message || '').slice(0, 80)}`);
+      } finally {
+        if (!cancelled) setPendingOpenId(null);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [padReady, pendingOpenId]);
+
+  // After a kit sound is re-rendered, re-apply it to the live session (if playing)
+  // so changed render settings are heard without a manual re-Play.
+  useEffect(() => {
+    if (!replayAfterRenderRef.current) return;
+    replayAfterRenderRef.current = false;
+    padRef.current?.reevaluate?.();
+  }, [kit]);
 
   useEffect(() => {
     let cancelled = false;
@@ -189,6 +230,7 @@ export default function App() {
         velocity: s.velocity ?? 1,
       });
       setKit((prev) => prev.map((k) => (k.name === entry.name ? { ...k, url, rendering: false } : k)));
+      replayAfterRenderRef.current = true; // re-apply to the live session if it's playing
       flash(`Rendered ${entry.name}`);
     } catch (e) {
       setKit((prev) => prev.map((k) => (k.name === entry.name ? { ...k, rendering: false } : k)));
@@ -253,18 +295,65 @@ export default function App() {
   // --- save / open ---
   const requireAuth = () => { if (!user) { setShowLogin(true); return false; } return true; };
 
-  const handleSave = async (meta) => {
+  // Don't persist ephemeral blob URLs or transient flags.
+  const buildState = () => {
+    const cleanKit = kit.map(({ url, rendering, ...rest }) => rest);
+    return { environment: 'strudel', code: padRef.current?.getCode() || '', kit: cleanKit, trajectory };
+  };
+
+  const handleSave = async (meta) => { // create a NEW composition (from the Save dialog)
     if (!requireAuth()) return;
     try {
-      // Don't persist ephemeral blob URLs or transient flags.
-      const cleanKit = kit.map(({ url, rendering, ...rest }) => rest);
-      const state = { environment: 'strudel', code: padRef.current?.getCode() || '', kit: cleanKit, trajectory };
-      const saved = await api.createSequence({ ...meta, state });
+      const saved = await api.createSequence({ ...meta, state: buildState() });
+      setCurrentSequence({
+        id: saved.id,
+        title: saved.title || meta.title || 'Untitled composition',
+        description: saved.description ?? meta.description ?? '',
+        visibility: saved.visibility ?? meta.visibility ?? 'private',
+        tags: saved.tags ?? meta.tags ?? [],
+      });
       setShowSave(false);
       flash(`Saved "${saved.title || meta.title}"`);
     } catch (err) {
       flash(err.message?.slice(0, 120) || 'Save failed');
     }
+  };
+
+  // Update the current composition in place (stable id). The backend now persists
+  // unit_state_json, so this is a true PATCH of metadata + content.
+  const saveInPlace = async () => {
+    if (!currentSequence) return;
+    try {
+      const updated = await api.updateSequence(currentSequence.id, {
+        title: currentSequence.title,
+        description: currentSequence.description || '',
+        visibility: currentSequence.visibility || 'private',
+        tags: currentSequence.tags || [],
+        state: buildState(),
+      });
+      setCurrentSequence({
+        id: updated.id || currentSequence.id,
+        title: updated.title ?? currentSequence.title,
+        description: updated.description ?? currentSequence.description ?? '',
+        visibility: updated.visibility ?? currentSequence.visibility ?? 'private',
+        tags: updated.tags ?? currentSequence.tags ?? [],
+      });
+      flash(`Saved "${updated.title || currentSequence.title}"`);
+    } catch (err) {
+      flash(err.message?.slice(0, 120) || 'Save failed');
+    }
+  };
+
+  const onSavePrimary = () => {
+    if (!requireAuth()) return;
+    if (currentSequence) saveInPlace();
+    else { setSaveInitialTitle(''); setShowSave(true); }
+  };
+
+  const onSaveAs = () => {
+    if (!requireAuth()) return;
+    setSaveInitialTitle(currentSequence ? `${currentSequence.title} copy` : '');
+    setShowSave(true);
   };
 
   const handleOpen = (seq) => {
@@ -273,8 +362,18 @@ export default function App() {
     setTrajectory(Array.isArray(st.trajectory) ? st.trajectory : []);
     setScrubIndex(null);
     padRef.current?.setCode(st.code || '');
+    // Only make it the "current" (in-place-savable) composition if the signed-in
+    // user owns it; otherwise it's a starting point and Save creates their own copy.
+    const owned = user && seq.userId === user.id;
+    setCurrentSequence(owned ? {
+      id: seq.id,
+      title: seq.title || 'Untitled',
+      description: seq.description || '',
+      visibility: seq.visibility || 'private',
+      tags: seq.tags || [],
+    } : null);
     setShowOpen(false);
-    flash(`Opened "${seq.title}"`);
+    flash(owned ? `Opened "${seq.title}"` : `Opened "${seq.title}" — Save will create your copy`);
   };
 
   // --- Ableton ---
@@ -376,7 +475,13 @@ export default function App() {
           </>
         )}
         <button className="btn ghost" onClick={() => setShowOpen(true)} disabled={!user}>Open…</button>
-        <button className="btn" onClick={() => (requireAuth() && setShowSave(true))}>Save</button>
+        {currentSequence && (
+          <span className="who current-seq" title="Current composition">{currentSequence.title}</span>
+        )}
+        <button className="btn" onClick={onSavePrimary} title={currentSequence ? `Save changes to “${currentSequence.title}”` : 'Save composition'}>Save</button>
+        {currentSequence && (
+          <button className="btn ghost" onClick={onSaveAs} title="Save as a new composition">Save As…</button>
+        )}
         {user ? (
           <div className="auth">
             <span className="who">{user.displayName || user.username}</span>
@@ -526,14 +631,14 @@ export default function App() {
             onCopy={copyPattern}
           />
 
-          <StrudelPad ref={padRef} getKitMap={getKitMap} onEval={handleEval} />
+          <StrudelPad ref={padRef} getKitMap={getKitMap} onEval={handleEval} onReady={() => setPadReady(true)} />
         </section>
       </main>
 
       {status && <div className="toast">{status}</div>}
 
       {showLogin && <LoginDialog onClose={() => setShowLogin(false)} onLoggedIn={(u) => { setUser(u); setShowLogin(false); }} />}
-      {showSave && <SaveDialog onClose={() => setShowSave(false)} onSave={handleSave} />}
+      {showSave && <SaveDialog initialTitle={saveInitialTitle} onClose={() => setShowSave(false)} onSave={handleSave} />}
       {showOpen && <OpenDialog onClose={() => setShowOpen(false)} onOpen={handleOpen} />}
       {showBounce && (
         <BounceDialog
@@ -633,7 +738,7 @@ function SettingsPanel({ entry, onChange, onReset, onRender, onClose }) {
       <div className="settings-grid">
         <label className="field">Duration (s)
           <input type="number" step="0.5" min="0.1" placeholder="preview"
-            value={s.duration ?? ''} onChange={(e) => onChange({ duration: numOrNull(e.target.value) })} />
+            value={s.duration ?? entry.duration ?? ''} onChange={(e) => onChange({ duration: numOrNull(e.target.value) })} />
         </label>
         <label className="field">Pitch (semitones)
           <input type="number" step="1" value={s.noteDelta ?? 0} onChange={(e) => onChange({ noteDelta: Number(e.target.value) })} />
@@ -709,8 +814,8 @@ function LoginDialog({ onClose, onLoggedIn }) {
   );
 }
 
-function SaveDialog({ onClose, onSave }) {
-  const [title, setTitle] = useState('');
+function SaveDialog({ onClose, onSave, initialTitle = '' }) {
+  const [title, setTitle] = useState(initialTitle);
   const [description, setDescription] = useState('');
   const [visibility, setVisibility] = useState('private');
   return (
