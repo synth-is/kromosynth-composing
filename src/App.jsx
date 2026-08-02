@@ -7,6 +7,7 @@ import { isAbletonHost, buildStemsSelection, sendToLive } from './lib/ableton.js
 import { bounceToWav, bytesToBase64 } from './lib/bounce.js';
 import { renderToWavUrl } from './lib/renderClient.js';
 import { getEnvironment } from './lib/environments.js';
+import { conceptsByCategory, conceptNames, transforms as conceptTransforms, explainConcepts } from './lib/concepts.js';
 
 const ABLETON = isAbletonHost();
 
@@ -88,6 +89,9 @@ export default function App() {
   const [saveInitialTitle, setSaveInitialTitle] = useState('');
   const [pendingOpenId, setPendingOpenId] = useState(null); // ?seq=<id> deep link
   const [padReady, setPadReady] = useState(false);
+  const [showConcepts, setShowConcepts] = useState(false);
+  const [selection, setSelection] = useState(null); // { from, to, text } | null (editor selection)
+  const [explainItems, setExplainItems] = useState(null); // concept[] | null ("explain this")
 
   const flash = useCallback((msg) => {
     setStatus(msg);
@@ -418,6 +422,29 @@ export default function App() {
     catch { flash('Copy failed'); }
   };
 
+  // Learning surfaces (concept palette + select-and-transform + explain), all
+  // backed by lib/concepts.js.
+  const applyTransform = (concept) => {
+    if (!selection || !concept.apply) return;
+    const next = padRef.current?.replaceSelection(concept.apply(selection.text));
+    setSelection(next || null);   // keep the new range selected so transforms can chain
+    setExplainItems(null);
+    padRef.current?.play();        // hear the result (and snapshot the trajectory)
+    flash(concept.label);
+  };
+  const insertConcept = (concept) => {
+    const code = concept.example ? concept.example(conceptNames(kit)) : '';
+    if (!code) return;
+    padRef.current?.setCode(code);
+    setShowConcepts(false);
+    renderAll();
+    padRef.current?.play();
+    flash(`Inserted: ${concept.label}`);
+  };
+  const explainSelection = () => {
+    if (selection) setExplainItems(explainConcepts(selection.text));
+  };
+
   const runSearch = async () => {
     const q = query.trim();
     if (q.length < 2) { flash('Type at least 2 characters'); return; }
@@ -629,9 +656,27 @@ export default function App() {
             onInsertStarter={insertStarter}
             onSurprise={surpriseMe}
             onCopy={copyPattern}
+            onBrowseConcepts={() => setShowConcepts(true)}
           />
 
-          <StrudelPad ref={padRef} getKitMap={getKitMap} onEval={handleEval} onReady={() => setPadReady(true)} />
+          {selection && (
+            <SelectionBar
+              selection={selection}
+              transforms={conceptTransforms('strudel', true)}
+              explainItems={explainItems}
+              onApply={applyTransform}
+              onExplain={explainSelection}
+              onClearExplain={() => setExplainItems(null)}
+            />
+          )}
+
+          <StrudelPad
+            ref={padRef}
+            getKitMap={getKitMap}
+            onEval={handleEval}
+            onReady={() => setPadReady(true)}
+            onSelectionChange={(sel) => { setSelection(sel); if (!sel) setExplainItems(null); }}
+          />
         </section>
       </main>
 
@@ -646,6 +691,9 @@ export default function App() {
           onClose={() => setShowBounce(false)}
           onBounce={(secs) => { setShowBounce(false); runBounce(secs); }}
         />
+      )}
+      {showConcepts && (
+        <ConceptsModal kit={kit} onInsert={insertConcept} onCopy={copyPattern} onClose={() => setShowConcepts(false)} />
       )}
     </div>
   );
@@ -698,13 +746,13 @@ function SoundCard({ sound, playing, onAudition, onAdd, initialSpec, onFindSimil
   );
 }
 
-function HintsBar({ env, kit, onInsertStarter, onSurprise, onCopy }) {
+function HintsBar({ env, kit, onInsertStarter, onSurprise, onCopy, onBrowseConcepts }) {
   const hints = env.hints(kit);
   return (
     <div className="hints">
       <div className="hints-head">
         <span className="muted small">
-          Tip: only the <em>last</em> expression plays — combine sounds with <code>stack(a, b)</code> or a <code>"a b"</code> sequence.
+          Tip: only the <em>last</em> expression plays. <strong>Select part of your code</strong> to transform it, or open <strong>Concepts</strong> to browse what's possible.
         </span>
         <span className="spacer" />
         <a className="hints-doc" href={env.docsUrl} target="_blank" rel="noopener noreferrer">{env.label} guide ↗</a>
@@ -712,12 +760,88 @@ function HintsBar({ env, kit, onInsertStarter, onSurprise, onCopy }) {
       <div className="hints-actions">
         <button className="btn tiny" onClick={onInsertStarter}>Insert starter</button>
         <button className="btn tiny ghost" onClick={onSurprise}>Surprise me</button>
+        <button className="btn tiny ghost" onClick={onBrowseConcepts}>Concepts ▤</button>
         <span className="hints-sep" />
         {hints.map((h) => (
           <button key={h.label} className="hint-chip" title={`Copy: ${h.code}`} onClick={() => onCopy(h.code)}>{h.label}</button>
         ))}
       </div>
     </div>
+  );
+}
+
+function SelectionBar({ selection, transforms, explainItems, onApply, onExplain, onClearExplain }) {
+  const snippet = (selection.text.length > 44 ? selection.text.slice(0, 44) + '…' : selection.text).replace(/\n/g, ' ');
+  return (
+    <div className="selbar">
+      <div className="selbar-head">
+        <span className="muted small">selected:</span>
+        <code className="selbar-snippet" title={selection.text}>{snippet}</code>
+        <span className="spacer" />
+        <button className="btn tiny" onClick={onExplain}>Explain this</button>
+      </div>
+      <div className="selbar-actions">
+        {transforms.map((t) => (
+          <button key={t.id} className="hint-chip" title={t.explain} onClick={() => onApply(t)}>{t.label}</button>
+        ))}
+      </div>
+      {explainItems && (
+        <div className="explain">
+          <div className="explain-head">
+            <span className="muted small">What this does</span>
+            <span className="spacer" />
+            <button className="btn tiny ghost" onClick={onClearExplain}>×</button>
+          </div>
+          {explainItems.length === 0
+            ? <div className="muted small">No recognised features in the selection — try selecting a function like <code>.fast(2)</code>, or a pattern in quotes.</div>
+            : <ul className="explain-list">{explainItems.map((c) => (<li key={c.id}><strong>{c.label}</strong> — {c.explain}</li>))}</ul>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ConceptsModal({ kit, onInsert, onCopy, onClose }) {
+  const names = conceptNames(kit);
+  const groups = conceptsByCategory('strudel');
+  return (
+    <Modal title="Concepts — what you can do" onClose={onClose}>
+      <p className="muted small" style={{ marginTop: 0 }}>
+        Insert an example to try it with your kit, then tweak and play — or select code in the editor to transform it.
+      </p>
+      <div className="concepts-scroll">
+        {groups.map((g) => (
+          <div key={g.category} className="concept-group">
+            <div className="concept-cat">{g.category}</div>
+            {g.items.map((c) => {
+              const ex = c.example ? c.example(names) : null;
+              return (
+                <div key={c.id} className="concept-card">
+                  <div className="concept-card-top">
+                    <span className="concept-label">{c.label}</span>
+                    <span className="muted small">{c.explain}</span>
+                  </div>
+                  {ex ? (
+                    <div className="concept-example">
+                      <code className="concept-code">{ex}</code>
+                      <div className="concept-btns">
+                        <button className="btn tiny" onClick={() => onInsert(c)}>Insert</button>
+                        <button className="btn tiny ghost" onClick={() => onCopy(ex)}>Copy</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="concept-example muted small">Select code in the editor, then apply this from the selection bar.</div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        ))}
+      </div>
+      <div className="modal-actions">
+        <button className="btn ghost" onClick={onClose}>Close</button>
+      </div>
+    </Modal>
   );
 }
 

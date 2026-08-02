@@ -91,5 +91,5 @@ docs/SAMPLE_MAP_MANIFEST.md  manifest format + rollout plan
 
 ## Licence
 
-AGPL-3.0-or-later (because it embeds Strudel). Vendor the full text before publishing:
+AGPL-3.0-or-later. Vendor the full text before publishing:
 `curl -L https://www.gnu.org/licenses/agpl-3.0.txt -o LICENSE`.

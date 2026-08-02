@@ -13,12 +13,20 @@ import '@strudel/repl';
  *
  * Imperative handle: { getCode, setCode, play, stop, isReady, getCps }.
  */
-const StrudelPad = forwardRef(function StrudelPad({ initialCode = '', getKitMap, onEval, onReady }, ref) {
+const StrudelPad = forwardRef(function StrudelPad({ initialCode = '', getKitMap, onEval, onReady, onSelectionChange }, ref) {
   const containerRef = useRef(null);
   const elRef = useRef(null);
   const readyRef = useRef(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [ready, setReady] = useState(false);
+
+  // Read the current CodeMirror selection (el.editor.editor is the CM6 EditorView).
+  const readSelection = () => {
+    const view = elRef.current?.editor?.editor;
+    if (!view?.state) return null;
+    const { from, to } = view.state.selection.main;
+    return { from, to, text: view.state.sliceDoc(from, to) };
+  };
 
   useEffect(() => {
     const container = containerRef.current;
@@ -75,6 +83,22 @@ const StrudelPad = forwardRef(function StrudelPad({ initialCode = '', getKitMap,
         try { el.editor.cm?.refresh(); } catch { /* ignore */ }
         try {
           if (typeof el.editor.enableHighlighting === 'function') el.editor.enableHighlighting(true);
+        } catch { /* ignore */ }
+        // Report selection changes so the parent can offer select-and-transform actions.
+        try {
+          const selRoot = el.editor.root;
+          if (selRoot && onSelectionChange) {
+            let lastKey = '';
+            const notify = () => {
+              const sel = readSelection();
+              const key = sel ? `${sel.from}:${sel.to}` : 'none';
+              if (key === lastKey) return;
+              lastKey = key;
+              onSelectionChange(sel && sel.from !== sel.to ? sel : null);
+            };
+            selRoot.addEventListener('mouseup', notify);
+            selRoot.addEventListener('keyup', notify);
+          }
         } catch { /* ignore */ }
         onReady?.();
         return;
@@ -148,6 +172,22 @@ const StrudelPad = forwardRef(function StrudelPad({ initialCode = '', getKitMap,
     // freshly re-rendered sound is picked up live without a manual re-Play.
     reevaluate: () => { if (isPlaying) doPlay(); },
     isReady: () => readyRef.current,
+    getSelection: () => {
+      const sel = readSelection();
+      return sel && sel.from !== sel.to ? sel : null;
+    },
+    // Replace the current selection and return the new selected range (for chaining).
+    replaceSelection: (text) => {
+      const view = elRef.current?.editor?.editor;
+      if (!view?.state) return null;
+      const { from, to } = view.state.selection.main;
+      const newTo = from + text.length;
+      try {
+        view.dispatch({ changes: { from, to, insert: text }, selection: { anchor: from, head: newTo } });
+        view.focus();
+      } catch (err) { console.error('[StrudelPad] replaceSelection failed:', err); return null; }
+      return { from, to: newTo, text };
+    },
     // cycles-per-second from the scheduler, for loop-aligned bounce lengths.
     getCps: () => {
       const repl = elRef.current?.editor?.repl;

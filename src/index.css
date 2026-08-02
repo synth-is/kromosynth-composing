@@ -198,3 +198,25 @@ body {
 .group-by select:focus { outline: none; border-color: var(--accent-2); }
 
 .current-seq { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.85; }
+
+/* selection bar (select-and-transform) */
+.selbar { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+.selbar-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.selbar-snippet { color: var(--accent); background: var(--panel-2); padding: 2px 6px; border-radius: 4px; font-family: monospace; font-size: 12px; max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.selbar-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+.explain { margin-top: 8px; border-top: 1px solid var(--border); padding-top: 8px; }
+.explain-head { display: flex; align-items: center; gap: 8px; }
+.explain-list { margin: 6px 0 0; padding-left: 18px; }
+.explain-list li { font-size: 13px; margin: 2px 0; }
+.explain-list code, .explain code { color: var(--accent); background: var(--panel-2); padding: 0 3px; border-radius: 3px; }
+
+/* concepts palette */
+.concepts-scroll { max-height: 55vh; overflow-y: auto; margin: 4px 0 10px; padding-right: 4px; }
+.concept-group { margin-bottom: 12px; }
+.concept-cat { font-size: 12px; font-weight: 600; color: var(--accent-2); text-transform: uppercase; letter-spacing: 0.04em; margin: 4px 0 6px; }
+.concept-card { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin-bottom: 6px; background: var(--panel-2); }
+.concept-card-top { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.concept-label { font-weight: 600; font-size: 13px; }
+.concept-example { display: flex; flex-direction: column; gap: 6px; }
+.concept-code { display: block; white-space: pre-wrap; font-family: monospace; font-size: 12px; color: var(--accent); background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; }
+.concept-btns { display: flex; gap: 6px; }

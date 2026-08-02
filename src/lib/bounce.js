@@ -56,6 +56,14 @@ export async function bounceToWav({ padRef, seconds = 8 } = {}) {
   const blob = new Blob(chunks, { type: rec.mimeType || 'audio/webm' });
   const decoded = await ctx.decodeAudioData(await blob.arrayBuffer());
   const mono = mixToMono(decoded);
+  // Detect a silent capture: if this import of superdough resolved to a different
+  // instance than the editor's (dedupe failure), the tap records nothing. Fail
+  // loudly rather than sending an empty clip to Live.
+  let peak = 0;
+  for (let i = 0; i < mono.length; i++) { const a = Math.abs(mono[i]); if (a > peak) peak = a; }
+  if (peak < 1e-4) {
+    throw new Error('Bounce captured silence — the Strudel output tap did not reach the editor’s audio (Vite dedupe; see docs/ABLETON_BRIDGE.md). Playback works, but the recording is empty.');
+  }
   return { wav: encodeWavPcm16(mono, decoded.sampleRate), durationSecs: decoded.duration };
 }
 
