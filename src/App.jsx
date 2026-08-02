@@ -108,14 +108,9 @@ export default function App() {
       if (cancelled) return;
       setUser(adopted || api.restoreSession());
       try {
-        const params = new URLSearchParams(window.location.search);
-        const seq = params.get('seq');
-        if (seq) {
-          setPendingOpenId(seq);
-          params.delete('seq');
-          const qs = params.toString();
-          window.history.replaceState(null, '', window.location.pathname + (qs ? `?${qs}` : '') + window.location.hash);
-        }
+        // Keep ?seq in the URL so it stays shareable (composing.synth.is/?seq=<id>).
+        const seq = new URLSearchParams(window.location.search).get('seq');
+        if (seq) setPendingOpenId(seq);
       } catch { /* ignore */ }
     })();
     return () => { cancelled = true; };
@@ -360,6 +355,17 @@ export default function App() {
     setShowSave(true);
   };
 
+  const copyShareLink = async () => {
+    if (!currentSequence) return;
+    const url = `${window.location.origin}/?seq=${currentSequence.id}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      flash(currentSequence.visibility === 'private'
+        ? "Link copied — but it's private, so only you can open it"
+        : 'Shareable link copied');
+    } catch { flash('Copy failed'); }
+  };
+
   const handleOpen = (seq) => {
     const st = seq.unitState || {};
     setKit((Array.isArray(st.kit) ? st.kit : []).map((k) => ({ ...k, url: k.previewUrl, rendering: false })));
@@ -504,6 +510,9 @@ export default function App() {
         <button className="btn ghost" onClick={() => setShowOpen(true)} disabled={!user}>Open…</button>
         {currentSequence && (
           <span className="who current-seq" title="Current composition">{currentSequence.title}</span>
+        )}
+        {currentSequence && (
+          <button className="btn ghost" onClick={copyShareLink} title="Copy a shareable link to this composition">🔗 Link</button>
         )}
         <button className="btn" onClick={onSavePrimary} title={currentSequence ? `Save changes to “${currentSequence.title}”` : 'Save composition'}>Save</button>
         {currentSequence && (

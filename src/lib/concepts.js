@@ -368,6 +368,19 @@ export const STRUDEL_CONCEPTS = [
     apply: (s) => `${s}.speed(perlin.range(0.9, 1.1))`,
     match: /\bperlin\b/,
   },
+
+  // ---- Arrangement (build a piece over time) ----
+  {
+    id: 'stackparts', category: 'Arrangement', label: 'Play parts together',
+    explain: 'Name a few parts and layer them so they sound at the same time (only the last expression plays — so make it one stack).',
+    example: (n) => `let drums = s("${n.a}*4")\nlet bass = s("${n.b}(3,8)")\nstack(drums, bass)`,
+  },
+  {
+    id: 'arrange', category: 'Arrangement', label: 'Arrange sections',
+    explain: 'Play different parts for a number of cycles each — the start of a song.',
+    example: (n) => `let a = s("${n.a}*4")\nlet b = s("${n.b}(3,8)").room(.3)\narrange([4, a], [4, b], [4, stack(a, b)])`,
+    match: /\barrange\s*\(/,
+  },
 ];
 
 const REGISTRY = { strudel: STRUDEL_CONCEPTS };
