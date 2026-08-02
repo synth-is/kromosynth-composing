@@ -303,6 +303,71 @@ export const STRUDEL_CONCEPTS = [
     apply: (s) => `${s}.coarse(4)`,
     match: /\.coarse\s*\(/,
   },
+
+  // ---- Harmony (chords & arpeggios) ----
+  {
+    id: 'chord', category: 'Harmony', label: 'Chord',
+    explain: 'Play several pitches at once, and move between chords per cycle.',
+    example: (n) => `note("<c'maj a'min f'maj g'maj>").s("${n.a}")`,
+    match: /'(maj|min|m7|maj7|dom7|7|sus2|sus4|dim|aug|add9)|\bchord\s*\(/,
+  },
+  {
+    id: 'arp', category: 'Harmony', label: 'Arpeggiate',
+    explain: 'Spread a chord out into an arpeggio.',
+    example: (n) => `note("<c'maj a'min>").arp("<up down updown>").s("${n.a}")`,
+    apply: (s) => `${s}.arp("up")`,
+    match: /\.arp\s*\(/,
+  },
+
+  // ---- Polyrhythm / polymeter ----
+  {
+    id: 'polyrhythm', category: 'Rhythm', label: 'Polyrhythm',
+    explain: 'Two different subdivisions filling the same cycle — e.g. 3 against 4.',
+    example: (n) => `s("[${n.a}*3, ${n.b}*4]")`,
+  },
+  {
+    id: 'polymeter', category: 'Rhythm', label: 'Polymeter',
+    explain: 'Stack patterns of different lengths that step through and drift against each other.',
+    example: (n) => `s("{${n.a} ${n.b}, ${n.c} ${n.a} ${n.b}}")`,
+    match: /\{[^}]*\}/,
+  },
+
+  // ---- Structural gating ----
+  {
+    id: 'struct', category: 'Structure', label: 'Impose a rhythm (struct)', quick: true,
+    explain: 'Give a sound a rhythm with a true/false pattern (1 = hit, 0 = rest).',
+    example: (n) => `s("${n.a}").struct("1 0 1 1 0 1 0 0")`,
+    apply: (s) => `${s}.struct("1 0 1 1")`,
+    match: /\.struct\s*\(/,
+  },
+  {
+    id: 'mask', category: 'Structure', label: 'Gate (mask)', quick: true,
+    explain: 'Silence parts of a pattern with a true/false gate, keeping its own timing.',
+    example: (n) => `s("${n.a}*8").mask("<1 1 0 1>")`,
+    apply: (s) => `${s}.mask("1 1 0 1")`,
+    match: /\.mask\s*\(/,
+  },
+
+  // ---- Modulation (LFOs & signals) ----
+  {
+    id: 'tremolo', category: 'Modulation', label: 'Tremolo (LFO)', quick: true,
+    explain: 'Pulse the volume up and down with an LFO.',
+    example: (n) => `s("${n.a}*8").gain(sine.range(0.4, 1).fast(2))`,
+    apply: (s) => `${s}.gain(sine.range(0.4, 1).fast(2))`,
+  },
+  {
+    id: 'autopan', category: 'Modulation', label: 'Auto-pan (LFO)', quick: true,
+    explain: 'Sweep the sound across the stereo field with an LFO.',
+    example: (n) => `s("${n.a}*4").pan(sine.slow(2))`,
+    apply: (s) => `${s}.pan(sine.slow(2))`,
+  },
+  {
+    id: 'drift', category: 'Modulation', label: 'Random drift (perlin)', quick: true,
+    explain: 'Modulate a parameter with smooth randomness for organic movement.',
+    example: (n) => `s("${n.a}*8").speed(perlin.range(0.9, 1.1))`,
+    apply: (s) => `${s}.speed(perlin.range(0.9, 1.1))`,
+    match: /\bperlin\b/,
+  },
 ];
 
 const REGISTRY = { strudel: STRUDEL_CONCEPTS };
