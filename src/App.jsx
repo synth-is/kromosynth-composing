@@ -772,6 +772,12 @@ function HintsBar({ env, kit, onInsertStarter, onSurprise, onCopy, onBrowseConce
 
 function SelectionBar({ selection, transforms, explainItems, onApply, onExplain, onClearExplain }) {
   const snippet = (selection.text.length > 44 ? selection.text.slice(0, 44) + '…' : selection.text).replace(/\n/g, ' ');
+  const grouped = [];
+  const gi = new Map();
+  for (const t of transforms) {
+    if (!gi.has(t.category)) { const g = { category: t.category, items: [] }; gi.set(t.category, g); grouped.push(g); }
+    gi.get(t.category).items.push(t);
+  }
   return (
     <div className="selbar">
       <div className="selbar-head">
@@ -781,8 +787,13 @@ function SelectionBar({ selection, transforms, explainItems, onApply, onExplain,
         <button className="btn tiny" onClick={onExplain}>Explain this</button>
       </div>
       <div className="selbar-actions">
-        {transforms.map((t) => (
-          <button key={t.id} className="hint-chip" title={t.explain} onClick={() => onApply(t)}>{t.label}</button>
+        {grouped.map((g) => (
+          <div key={g.category} className="selbar-group">
+            <span className="selbar-cat">{g.category}</span>
+            {g.items.map((t) => (
+              <button key={t.id} className="hint-chip" title={t.explain} onClick={() => onApply(t)}>{t.label}</button>
+            ))}
+          </div>
         ))}
       </div>
       {explainItems && (

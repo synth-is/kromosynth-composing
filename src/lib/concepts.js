@@ -201,6 +201,108 @@ export const STRUDEL_CONCEPTS = [
     example: (n) => `s(choose("${n.a}", "${n.b}", "${n.c}"))`,
     match: /\bchoose\s*\(/,
   },
+
+  // ---- Sampling / chopping (great for the longer evolved textures) ----
+  {
+    id: 'chop', category: 'Sampling', label: 'Chop', quick: true,
+    explain: 'Chop a sound into N pieces played in order — turn a long texture into a rhythm.',
+    example: (n) => `s("${n.a}").chop(8)`,
+    apply: (s) => `${s}.chop(8)`,
+    match: /\.chop\s*\(/,
+  },
+  {
+    id: 'slice', category: 'Sampling', label: 'Slice & reorder', quick: true,
+    explain: 'Cut into N slices, then play them in any order you like.',
+    example: (n) => `s("${n.a}").slice(8, "0 2 1 3 4 6 5 7")`,
+    apply: (s) => `${s}.slice(8, "0 2 1 3")`,
+    match: /\.slice\s*\(/,
+  },
+  {
+    id: 'striate', category: 'Sampling', label: 'Striate (granular)', quick: true,
+    explain: 'Interleave N slices across the cycle — a granular, shimmering read of the sound.',
+    example: (n) => `s("${n.a}").striate(16)`,
+    apply: (s) => `${s}.striate(16)`,
+    match: /\.striate\s*\(/,
+  },
+  {
+    id: 'loopAt', category: 'Sampling', label: 'Fit to cycles', quick: true,
+    explain: 'Stretch a sample to fill N cycles, so a loop locks to the tempo.',
+    example: (n) => `s("${n.a}").loopAt(2)`,
+    apply: (s) => `${s}.loopAt(2)`,
+    match: /\.loopAt\s*\(/,
+  },
+  {
+    id: 'range', category: 'Sampling', label: 'Play a portion',
+    explain: 'Play just part of the sample (0–1 of its length).',
+    example: (n) => `s("${n.a}").begin(0.25).end(0.75)`,
+    apply: (s) => `${s}.begin(0.25).end(0.75)`,
+    match: /\.(begin|end)\s*\(/,
+  },
+  {
+    id: 'chopshuffle', category: 'Sampling', label: 'Chop + reverse',
+    explain: 'Chop, then reverse the order of the pieces for a glitchy re-read.',
+    example: (n) => `s("${n.a}").chop(8).rev()`,
+    apply: (s) => `${s}.chop(8).rev()`,
+  },
+
+  // ---- more Motion ----
+  {
+    id: 'off', category: 'Motion', label: 'Offset echo', quick: true,
+    explain: 'Layer a time-shifted copy of the pattern — a canon or echo.',
+    example: (n) => `s("${n.a}*4").off(1/8, x => x.speed(2))`,
+    apply: (s) => `${s}.off(1/8, x => x.speed(2))`,
+    match: /\.off\s*\(/,
+  },
+  {
+    id: 'superimpose', category: 'Motion', label: 'Layer a variation',
+    explain: 'Play the pattern plus a transformed copy of itself, together.',
+    example: (n) => `s("${n.a}*4").superimpose(fast(2))`,
+    apply: (s) => `${s}.superimpose(fast(2))`,
+    match: /\.superimpose\s*\(/,
+  },
+  {
+    id: 'chunk', category: 'Motion', label: 'Rotating transform',
+    explain: 'Apply a transform to a different chunk of the pattern each cycle.',
+    example: (n) => `s("${n.a}*4").chunk(4, fast(2))`,
+    apply: (s) => `${s}.chunk(4, fast(2))`,
+    match: /\.chunk\s*\(/,
+  },
+  {
+    id: 'filtersweep', category: 'Motion', label: 'Filter sweep (LFO)', quick: true,
+    explain: 'Sweep the low-pass filter with a slow LFO for wobble and movement.',
+    example: (n) => `s("${n.a}*8").lpf(sine.range(300, 2000).slow(4))`,
+    apply: (s) => `${s}.lpf(sine.range(300, 2000).slow(4))`,
+  },
+
+  // ---- more Tone & space ----
+  {
+    id: 'vowel', category: 'Tone & space', label: 'Vowel filter', quick: true,
+    explain: 'A formant / vowel filter for a vocal, talking quality.',
+    example: (n) => `s("${n.a}*4").vowel("<a e i o>")`,
+    apply: (s) => `${s}.vowel("<a e i>")`,
+    match: /\.vowel\s*\(/,
+  },
+  {
+    id: 'crush', category: 'Tone & space', label: 'Bit-crush', quick: true,
+    explain: 'Reduce bit depth for lo-fi, crunchy grit.',
+    example: (n) => `s("${n.a}*4").crush(4)`,
+    apply: (s) => `${s}.crush(4)`,
+    match: /\.crush\s*\(/,
+  },
+  {
+    id: 'shape', category: 'Tone & space', label: 'Distortion',
+    explain: 'Waveshaping distortion — warmth or edge.',
+    example: (n) => `s("${n.a}*4").shape(.4)`,
+    apply: (s) => `${s}.shape(.4)`,
+    match: /\.shape\s*\(/,
+  },
+  {
+    id: 'coarse', category: 'Tone & space', label: 'Downsample',
+    explain: 'Sample-rate reduction for a crunchy, aliased tone.',
+    example: (n) => `s("${n.a}*4").coarse(4)`,
+    apply: (s) => `${s}.coarse(4)`,
+    match: /\.coarse\s*\(/,
+  },
 ];
 
 const REGISTRY = { strudel: STRUDEL_CONCEPTS };

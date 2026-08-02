@@ -203,7 +203,9 @@ body {
 .selbar { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
 .selbar-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .selbar-snippet { color: var(--accent); background: var(--panel-2); padding: 2px 6px; border-radius: 4px; font-family: monospace; font-size: 12px; max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.selbar-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+.selbar-actions { display: flex; flex-direction: column; gap: 4px; }
+.selbar-group { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+.selbar-cat { font-size: 10px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; min-width: 84px; }
 .explain { margin-top: 8px; border-top: 1px solid var(--border); padding-top: 8px; }
 .explain-head { display: flex; align-items: center; gap: 8px; }
 .explain-list { margin: 6px 0 0; padding-left: 18px; }
