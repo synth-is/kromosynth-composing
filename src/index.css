@@ -222,3 +222,27 @@ body {
 .concept-example { display: flex; flex-direction: column; gap: 6px; }
 .concept-code { display: block; white-space: pre-wrap; font-family: monospace; font-size: 12px; color: var(--accent); background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; }
 .concept-btns { display: flex; gap: 6px; }
+
+/* ---- mobile / narrow screens: stack the columns and let the page scroll ---- */
+@media (max-width: 720px) {
+  /* the desktop shell pins everything to viewport height with no page scroll;
+     on mobile we let content flow and the body scroll instead. */
+  html, body, #root { height: auto; min-height: 100%; }
+  .app { height: auto; min-height: 100vh; }
+
+  .topbar { flex-wrap: wrap; }
+  .current-seq { max-width: 45vw; }
+
+  .layout { flex-direction: column; min-height: 0; }
+  .sidebar {
+    width: 100%; flex: none;
+    border-right: none; border-bottom: 1px solid var(--border);
+    max-height: 45vh;              /* keep the sound browser compact; its list scrolls */
+  }
+  .workspace { padding: 10px; gap: 10px; }
+
+  .pad { min-height: 60vh; }        /* give the editor real height once stacked */
+  .pad-editor { min-height: 320px; }
+
+  .selbar-cat { min-width: 0; width: 100%; }   /* category label on its own line */
+}
