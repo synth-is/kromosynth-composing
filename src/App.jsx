@@ -8,6 +8,7 @@ import { bounceToWav, bytesToBase64 } from './lib/bounce.js';
 import { renderToWavUrl } from './lib/renderClient.js';
 import { getEnvironment } from './lib/environments.js';
 import { conceptsByCategory, conceptNames, transforms as conceptTransforms, explainConcepts } from './lib/concepts.js';
+import * as llm from './lib/llm.js';
 
 const ABLETON = isAbletonHost();
 
@@ -60,6 +61,8 @@ export default function App() {
   const padRef = useRef(null);
   const auditionRef = useRef(null);
   const replayAfterRenderRef = useRef(false);
+  // Lets an AI (or other labelled) edit stamp the next trajectory snapshot; consumed by handleEval.
+  const pendingLabelRef = useRef(null);
 
   const [user, setUser] = useState(null);
   const [source, setSource] = useState('public'); // 'public' | 'garden'
@@ -92,6 +95,11 @@ export default function App() {
   const [showConcepts, setShowConcepts] = useState(false);
   const [selection, setSelection] = useState(null); // { from, to, text } | null (editor selection)
   const [explainItems, setExplainItems] = useState(null); // concept[] | null ("explain this")
+
+  // Ask-AI (bring-your-own-endpoint) state — see lib/llm.js.
+  const [aiEndpoint, setAiEndpoint] = useState(() => llm.loadEndpoint());
+  const [showAiSettings, setShowAiSettings] = useState(false);
+  const [aiBusy, setAiBusy] = useState(false);
 
   const flash = useCallback((msg) => {
     setStatus(msg);
@@ -267,7 +275,9 @@ export default function App() {
 
   // --- trajectory ---
   const handleEval = useCallback((code) => {
-    setTrajectory((prev) => appendSnapshot(prev, makeSnapshot(code, kit)));
+    const label = pendingLabelRef.current || '';
+    pendingLabelRef.current = null;
+    setTrajectory((prev) => appendSnapshot(prev, makeSnapshot(code, kit, label)));
     setScrubIndex(null);
   }, [kit]);
 
@@ -449,6 +459,45 @@ export default function App() {
   };
   const explainSelection = () => {
     if (selection) setExplainItems(explainConcepts(selection.text));
+  };
+
+  // --- Ask AI (plain-English edits via the user's own endpoint) ---
+  const saveAiEndpoint = (cfg) => {
+    llm.saveEndpoint(cfg);
+    setAiEndpoint(cfg);
+    setShowAiSettings(false);
+    flash('AI endpoint saved');
+  };
+  const clearAiEndpoint = () => {
+    llm.clearEndpoint();
+    setAiEndpoint(null);
+    setShowAiSettings(false);
+    flash('AI endpoint cleared');
+  };
+  const askAi = async (instruction) => {
+    const text = (instruction || '').trim();
+    if (!text) return;
+    if (!llm.isConfigured(aiEndpoint)) { setShowAiSettings(true); return; }
+    const code = padRef.current?.getCode?.() ?? '';
+    const sel = padRef.current?.getSelection?.() || null;
+    setAiBusy(true);
+    flash('Asking AI…');
+    try {
+      const { code: out } = await llm.askEdit({ instruction: text, code, selection: sel, kit, env, endpoint: aiEndpoint });
+      const clean = (out || '').trim();
+      if (!clean) { flash('AI returned no code'); return; }
+      // Provenance (transparency): record which model/endpoint made the change, and the ask.
+      const short = text.length > 60 ? text.slice(0, 60) + '…' : text;
+      pendingLabelRef.current = `AI · ${aiEndpoint.model || aiEndpoint.provider}: ${short}`;
+      if (sel) setSelection(padRef.current?.replaceSelection(clean) || null);
+      else { padRef.current?.setCode(clean); setSelection(null); }
+      padRef.current?.play(); // hear it, and snapshot the (labelled) trajectory step
+    } catch (e) {
+      pendingLabelRef.current = null;
+      flash(`AI failed: ${(e.message || '').slice(0, 120)}`);
+    } finally {
+      setAiBusy(false);
+    }
   };
 
   const runSearch = async () => {
@@ -679,6 +728,14 @@ export default function App() {
             />
           )}
 
+          <AskAiBar
+            configured={llm.isConfigured(aiEndpoint)}
+            busy={aiBusy}
+            hasSelection={!!selection}
+            onAsk={askAi}
+            onOpenSettings={() => setShowAiSettings(true)}
+          />
+
           <StrudelPad
             ref={padRef}
             getKitMap={getKitMap}
@@ -703,6 +760,14 @@ export default function App() {
       )}
       {showConcepts && (
         <ConceptsModal kit={kit} onInsert={insertConcept} onCopy={copyPattern} onClose={() => setShowConcepts(false)} />
+      )}
+      {showAiSettings && (
+        <AiSettingsDialog
+          initial={aiEndpoint}
+          onClose={() => setShowAiSettings(false)}
+          onSave={saveAiEndpoint}
+          onClear={clearAiEndpoint}
+        />
       )}
     </div>
   );
@@ -824,11 +889,46 @@ function SelectionBar({ selection, transforms, explainItems, onApply, onExplain,
 function ConceptsModal({ kit, onInsert, onCopy, onClose }) {
   const names = conceptNames(kit);
   const groups = conceptsByCategory('strudel');
+  const [midi, setMidi] = useState(null); // null | 'loading' | { supported, inputs, outputs }
+  const loadMidi = async () => {
+    setMidi('loading');
+    try {
+      if (!navigator.requestMIDIAccess) { setMidi({ supported: false }); return; }
+      const access = await navigator.requestMIDIAccess();
+      setMidi({
+        supported: true,
+        inputs: [...access.inputs.values()].map((d) => d.name).filter(Boolean),
+        outputs: [...access.outputs.values()].map((d) => d.name).filter(Boolean),
+      });
+    } catch (e) { setMidi({ supported: false, error: e.message }); }
+  };
   return (
     <Modal title="Concepts — what you can do" onClose={onClose}>
       <p className="muted small" style={{ marginTop: 0 }}>
         Insert an example to try it with your kit, then tweak and play — or select code in the editor to transform it.
       </p>
+      <div className="midi-devices">
+        <div className="midi-devices-head">
+          <span className="muted small">MIDI devices — for the Control / MIDI recipes</span>
+          <span className="spacer" />
+          <button className="btn tiny" onClick={loadMidi}>{midi === 'loading' ? 'Detecting…' : 'Detect'}</button>
+        </div>
+        {midi && midi !== 'loading' && !midi.supported && (
+          <div className="muted small">Web MIDI isn’t available in this browser.</div>
+        )}
+        {midi && midi !== 'loading' && midi.supported && (
+          (midi.inputs.length + midi.outputs.length) === 0
+            ? <div className="muted small">No devices found — connect one and Detect again.</div>
+            : <div className="midi-devices-list">
+                {midi.inputs.map((nm) => (
+                  <button key={'i' + nm} className="hint-chip" title="Copy — use in midin() / midikeys()" onClick={() => onCopy(nm)}>in · {nm}</button>
+                ))}
+                {midi.outputs.map((nm) => (
+                  <button key={'o' + nm} className="hint-chip" title="Copy — use in .midi()" onClick={() => onCopy(nm)}>out · {nm}</button>
+                ))}
+              </div>
+        )}
+      </div>
       <div className="concepts-scroll">
         {groups.map((g) => (
           <div key={g.category} className="concept-group">
@@ -1039,6 +1139,72 @@ function BounceDialog({ cps, onClose, onBounce }) {
       <div className="modal-actions">
         <button className="btn ghost" onClick={onClose}>Cancel</button>
         <button className="btn" onClick={() => onBounce(secs)}>Bounce &amp; send</button>
+      </div>
+    </Modal>
+  );
+}
+
+function AskAiBar({ configured, busy, hasSelection, onAsk, onOpenSettings }) {
+  const [text, setText] = useState('');
+  const submit = () => { const t = text.trim(); if (t) onAsk(t); };
+  return (
+    <div className="askai" style={{ margin: '8px 0' }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <input
+          className="search"
+          style={{ flex: 1 }}
+          placeholder={configured
+            ? (hasSelection ? 'Ask AI to change the selection…' : 'Ask AI to change the code…')
+            : 'Ask AI to change the code…  (⚙ set up an endpoint first)'}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); } }}
+          disabled={busy}
+        />
+        <button className="btn tiny" onClick={submit} disabled={busy || !text.trim()}>{busy ? 'Asking…' : 'Ask AI'}</button>
+        <button className="btn tiny ghost" title="AI endpoint settings" onClick={onOpenSettings}>⚙</button>
+      </div>
+      <div className="muted small" style={{ marginTop: 4 }}>
+        {hasSelection ? 'Rewrites the selected code' : 'Rewrites the whole buffer'} · runs on your own endpoint (local or cloud) · lands as an undoable trajectory step.
+      </div>
+    </div>
+  );
+}
+
+function AiSettingsDialog({ initial, onClose, onSave, onClear }) {
+  const [provider, setProvider] = useState(initial?.provider || 'openai-compatible');
+  const [baseUrl, setBaseUrl] = useState(initial?.baseUrl || '');
+  const [model, setModel] = useState(initial?.model || '');
+  const [apiKey, setApiKey] = useState(initial?.apiKey || '');
+  const meta = llm.providerMeta(provider);
+  const canSave = !!model.trim() && (meta.keyOptional || !!apiKey.trim());
+  const changeProvider = (id) => { setProvider(id); setBaseUrl(''); };
+  return (
+    <Modal title="AI endpoint" onClose={onClose}>
+      <p className="muted small" style={{ marginTop: 0 }}>
+        Bring your own model. Everything here is stored only in this browser and sent only to the
+        endpoint you set — there is no shared key.
+      </p>
+      <label className="field">Provider
+        <select value={provider} onChange={(e) => changeProvider(e.target.value)}>
+          {llm.PROVIDERS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+        </select>
+      </label>
+      <label className="field">Base URL
+        <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder={meta.defaultBaseUrl} />
+      </label>
+      <label className="field">Model
+        <input value={model} onChange={(e) => setModel(e.target.value)} placeholder={meta.modelPlaceholder} autoFocus />
+      </label>
+      <label className="field">API key {meta.keyOptional && <span className="muted small">(only needed if your server requires one)</span>}
+        <input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder={meta.keyOptional ? 'blank unless your server requires a key' : 'sk-…'} />
+      </label>
+      {meta.note && <div className="muted small" style={{ marginTop: 4 }}>{meta.note}</div>}
+      <div className="modal-actions">
+        {initial && <button className="btn ghost" onClick={onClear} title="Remove the saved endpoint">Clear</button>}
+        <span className="spacer" />
+        <button className="btn ghost" onClick={onClose}>Cancel</button>
+        <button className="btn" disabled={!canSave} onClick={() => onSave({ provider, baseUrl: (baseUrl || meta.defaultBaseUrl).trim(), model: model.trim(), apiKey: apiKey.trim() })}>Save</button>
       </div>
     </Modal>
   );

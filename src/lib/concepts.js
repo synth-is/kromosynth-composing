@@ -381,6 +381,32 @@ export const STRUDEL_CONCEPTS = [
     example: (n) => `let a = s("${n.a}*4")\nlet b = s("${n.b}(3,8)").room(.3)\narrange([4, a], [4, b], [4, stack(a, b)])`,
     match: /\barrange\s*\(/,
   },
+
+  // ---- Control / MIDI (play & control from hardware) ----
+  {
+    id: 'midi-keys', category: 'Control / MIDI', label: 'Play with a MIDI keyboard',
+    explain: 'Trigger a sound by pressing keys on a MIDI keyboard. Swap in your device name (use Detect above).',
+    example: (n) => `const kb = await midikeys('Your Keyboard')\nkb().s("${n.a}").lpf(1200).room(.3)`,
+    match: /\bmidikeys\s*\(/,
+  },
+  {
+    id: 'midi-knob', category: 'Control / MIDI', label: 'Map a knob to a parameter',
+    explain: 'Twist a physical knob (CC 74 here) to sweep a parameter live. Set your device name and CC number.',
+    example: (n) => `const cc = await midin('Your Controller')\ns("${n.a}*8").lpf(cc(74).range(200, 4000))`,
+    match: /\bmidin\s*\(/,
+  },
+  {
+    id: 'midi-out', category: 'Control / MIDI', label: 'Send notes to a synth / DAW',
+    explain: 'Send the pattern out as MIDI notes to hardware or a DAW (leave the name blank for the first device).',
+    example: (n) => `note("<c e g a>").midi('IAC Driver')`,
+    match: /\.midi\s*\(/,
+  },
+  {
+    id: 'midi-clock', category: 'Control / MIDI', label: 'Sync a DAW to Strudel',
+    explain: 'Send MIDI clock + start/stop so your DAW or drum machine follows Strudel’s tempo.',
+    example: (n) => `midicmd("clock*48,<start stop>/2").midi('IAC Driver')`,
+    match: /\bmidicmd\s*\(/,
+  },
 ];
 
 const REGISTRY = { strudel: STRUDEL_CONCEPTS };
@@ -423,4 +449,96 @@ export function transforms(envId = 'strudel', onlyQuick = false) {
 export function explainConcepts(text, envId = 'strudel') {
   if (!text) return [];
   return getConcepts(envId).filter((c) => c.match && c.match.test(text));
+}
+
+/**
+ * Compact, copyright-clean reference for an LLM — DERIVED from the same concept
+ * library that drives the palette (so maintaining the palette maintains the AI's
+ * knowledge). It is deliberately version-matched to the bundled Strudel: a model
+ * shouldn't be told about functions the shipped version lacks, since those would
+ * just error. Refresh at dependency-bump time, not continuously (docs/AI_EDIT_PLAN.md §6).
+ *
+ * Keep STRUDEL_REFERENCE_VERSION in sync with @strudel/repl in package.json.
+ */
+export const STRUDEL_REFERENCE_VERSION = '1.3';
+
+// Core syntax the palette has no single concept for — hand-written, brief.
+const STRUDEL_PREAMBLE = `Strudel is a JavaScript live-coding language (TidalCycles in the browser). Essentials:
+- Only the LAST top-level expression makes sound. Build ONE expression (use stack / arrange / cat), or prefix parallel parts with "$:".
+- Sound comes from samples: s("name") plays a registered sample; the available names are listed under the prompt.
+- Mini-notation lives inside the quotes: "a b c" = a sequence (one per step); "a*4" = repeat 4x; "~" = a rest; "<a b>" = one per cycle (alternate); "[a b]" = a group/subdivision; "a(3,8)" = a Euclidean rhythm; "{a b, c d e}" = polymeter.
+- Chain transforms with dots: s("a*4").fast(2).lpf(800).room(.3).
+- Pitch: note("c e g") or n("0 2 4").scale("C:minor"). Layer with stack(a, b); one pattern per cycle with cat(a, b); arrange sections over cycles with arrange([4, a], [4, b]).
+- Signals modulate parameters: sine, saw, tri, perlin — e.g. .lpf(sine.range(300, 2000).slow(4)).`;
+
+/**
+ * A compact reference block for an LLM system prompt, built from the concept library.
+ * @param {string} envId
+ * @param {Array} kit  current kit entries (their names fill the examples)
+ * @returns {string}
+ */
+export function buildReference(envId = 'strudel', kit = []) {
+  const names = conceptNames(kit);
+  const preamble = envId === 'strudel' ? STRUDEL_PREAMBLE : '';
+  const version = envId === 'strudel' ? STRUDEL_REFERENCE_VERSION : '';
+  const lines = [];
+  for (const group of conceptsByCategory(envId)) {
+    lines.push(`\n## ${group.category}`);
+    for (const c of group.items) {
+      const ex = c.example ? ` — e.g. \`${c.example(names).replace(/\n/g, ' ')}\`` : '';
+      lines.push(`- ${c.label}: ${c.explain}${ex}`);
+    }
+  }
+  return [
+    preamble,
+    version ? `\nThis targets Strudel ~${version}; only use functions available in that version.` : '',
+    '\nAvailable techniques (label: what it does — example):',
+    lines.join('\n'),
+  ].filter(Boolean).join('\n');
+}
+
+/**
+ * Compact, copyright-clean reference for an LLM — DERIVED from the same concept
+ * library that drives the palette (so maintaining the palette maintains the AI's
+ * knowledge). It is deliberately version-matched to the bundled Strudel: a model
+ * shouldn't be told about functions the shipped version lacks, since those would
+ * just error. Refresh at dependency-bump time, not continuously (docs/AI_EDIT_PLAN.md §6).
+ *
+ * Keep STRUDEL_REFERENCE_VERSION in sync with @strudel/repl in package.json.
+ */
+export const STRUDEL_REFERENCE_VERSION = '1.3';
+
+// Core syntax the palette has no single concept for — hand-written, brief.
+const STRUDEL_PREAMBLE = `Strudel is a JavaScript live-coding language (TidalCycles in the browser). Essentials:
+- Only the LAST top-level expression makes sound. Build ONE expression (use stack / arrange / cat), or prefix parallel parts with "$:".
+- Sound comes from samples: s("name") plays a registered sample; the available names are listed under the prompt.
+- Mini-notation lives inside the quotes: "a b c" = a sequence (one per step); "a*4" = repeat 4x; "~" = a rest; "<a b>" = one per cycle (alternate); "[a b]" = a group/subdivision; "a(3,8)" = a Euclidean rhythm; "{a b, c d e}" = polymeter.
+- Chain transforms with dots: s("a*4").fast(2).lpf(800).room(.3).
+- Pitch: note("c e g") or n("0 2 4").scale("C:minor"). Layer with stack(a, b); one pattern per cycle with cat(a, b); arrange sections over cycles with arrange([4, a], [4, b]).
+- Signals modulate parameters: sine, saw, tri, perlin — e.g. .lpf(sine.range(300, 2000).slow(4)).`;
+
+/**
+ * A compact reference block for an LLM system prompt, built from the concept library.
+ * @param {string} envId
+ * @param {Array} kit  current kit entries (their names fill the examples)
+ * @returns {string}
+ */
+export function buildReference(envId = 'strudel', kit = []) {
+  const names = conceptNames(kit);
+  const preamble = envId === 'strudel' ? STRUDEL_PREAMBLE : '';
+  const version = envId === 'strudel' ? STRUDEL_REFERENCE_VERSION : '';
+  const lines = [];
+  for (const group of conceptsByCategory(envId)) {
+    lines.push(`\n## ${group.category}`);
+    for (const c of group.items) {
+      const ex = c.example ? ` — e.g. \`${c.example(names).replace(/\n/g, ' ')}\`` : '';
+      lines.push(`- ${c.label}: ${c.explain}${ex}`);
+    }
+  }
+  return [
+    preamble,
+    version ? `\nThis targets Strudel ~${version}; only use functions available in that version.` : '',
+    '\nAvailable techniques (label: what it does — example):',
+    lines.join('\n'),
+  ].filter(Boolean).join('\n');
 }
