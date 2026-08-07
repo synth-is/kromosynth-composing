@@ -500,6 +500,40 @@ export default function App() {
     }
   };
 
+  // --- Fit a sound in: describe the kit sound, then ask the model to arrange it ---
+  const fitSoundIn = async (entry) => {
+    if (!entry) return;
+    if (!llm.isConfigured(aiEndpoint)) { setShowAiSettings(true); return; }
+    setAiBusy(true);
+    flash(`Describing ${entry.name}…`);
+    try {
+      let desc = null;
+      try {
+        if (entry.soundId) desc = await api.describeSound(entry.soundId);
+      } catch { /* description is best-effort — arrange by name alone if it fails */ }
+      const tags = (desc?.tags || []).slice(0, 8);
+      const labelBits = desc?.perceptual_labels ? Object.values(desc.perceptual_labels).filter(Boolean) : [];
+      const sonic = [...new Set([...(desc?.sound_type ? [desc.sound_type] : []), ...labelBits, ...tags])].join(', ');
+      const code = padRef.current?.getCode?.() ?? '';
+      const instruction = sonic
+        ? `Weave the existing kit sound s("${entry.name}") into this pattern so it fits musically. That sound is: ${sonic}. Keep what's already there and add this sound tastefully — as rhythm, a layer, or a complementary part.`
+        : `Weave the existing kit sound s("${entry.name}") into this pattern so it fits musically. Keep what's already there and add it tastefully.`;
+      flash(`Fitting ${entry.name} in…`);
+      const { code: out } = await llm.askEdit({ instruction, code, selection: null, kit, env, endpoint: aiEndpoint });
+      const clean = (out || '').trim();
+      if (!clean) { flash('AI returned no code'); return; }
+      pendingLabelRef.current = `AI · fit ${entry.name}`;
+      padRef.current?.setCode(clean);
+      setSelection(null);
+      padRef.current?.play(); // hear it, and snapshot the (labelled) trajectory step
+    } catch (e) {
+      pendingLabelRef.current = null;
+      flash(`Fit failed: ${(e.message || '').slice(0, 120)}`);
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
   const runSearch = async () => {
     const q = query.trim();
     if (q.length < 2) { flash('Type at least 2 characters'); return; }
@@ -680,6 +714,7 @@ export default function App() {
                     <button className="chip-name" title='Copy s("name")' onClick={() => copyToken(k.name)}>
                       {marker}{k.name}
                     </button>
+                    <button className="chip-x" title="Fit this sound into the pattern (AI)" disabled={aiBusy} onClick={() => fitSoundIn(k)}>✦</button>
                     <button className="chip-x" title="Render settings" onClick={() => setSettingsFor(settingsFor === k.name ? null : k.name)}>⚙</button>
                     <button className="chip-x" title="Remove" onClick={() => removeFromKit(k.name)}>×</button>
                   </span>

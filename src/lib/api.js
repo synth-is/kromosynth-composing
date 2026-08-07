@@ -226,6 +226,25 @@ export async function fetchSpectrogramUrl(soundId) {
   return url;
 }
 
+/**
+ * Compact, LLM-friendly description of a sound (perceptual labels + CLAP zero-shot
+ * timbral tags), from kromosynth-recommend. Public endpoint — no auth. Used by the
+ * "fit a sound in" feature.
+ */
+export async function describeSound(soundId, { encoders, topK } = {}) {
+  const params = new URLSearchParams();
+  if (encoders && encoders.length) params.set('encoders', encoders.join(','));
+  if (topK) params.set('topK', String(topK));
+  const qs = params.toString();
+  const res = await fetch(
+    `${RECOMMEND_URL}/api/sounds/${encodeURIComponent(soundId)}/describe${qs ? `?${qs}` : ''}`
+  );
+  if (!res.ok) throw new Error((await res.text().catch(() => '')) || `Describe failed (HTTP ${res.status})`);
+  const data = await res.json().catch(() => ({}));
+  if (data && data.success === false) throw new Error(data.error || 'Describe failed');
+  return data?.data || {};
+}
+
 // Semantic (embedding) search encoders. clap covers the broadest corpus; the
 // others are backfilled over the adopted pool only.
 export const SEARCH_ENCODERS = [
