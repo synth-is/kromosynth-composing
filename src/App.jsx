@@ -365,6 +365,19 @@ export default function App() {
     setShowSave(true);
   };
 
+  const changeVisibility = async (visibility) => {
+    if (!currentSequence) return;
+    try {
+      const updated = await api.updateSequenceMeta(currentSequence.id, { visibility });
+      setCurrentSequence((cs) => ({ ...cs, visibility: updated?.visibility ?? visibility }));
+      flash(visibility === 'public'
+        ? 'Now public — anyone with the link can open it'
+        : 'Now private — only you can open it');
+    } catch (e) {
+      flash(`Couldn't change visibility: ${(e.message || '').slice(0, 90)}`);
+    }
+  };
+
   const copyShareLink = async () => {
     if (!currentSequence) return;
     const url = `${window.location.origin}/?seq=${currentSequence.id}`;
@@ -593,6 +606,17 @@ export default function App() {
         <button className="btn ghost" onClick={() => setShowOpen(true)} disabled={!user}>Open…</button>
         {currentSequence && (
           <span className="who current-seq" title="Current composition">{currentSequence.title}</span>
+        )}
+        {currentSequence && (
+          <button
+            className="btn ghost"
+            onClick={() => changeVisibility(currentSequence.visibility === 'public' ? 'private' : 'public')}
+            title={currentSequence.visibility === 'public'
+              ? 'Public — anyone with the link can open it. Click to make private.'
+              : 'Private — only you can open it. Click to make public.'}
+          >
+            {currentSequence.visibility === 'public' ? '🌐 Public' : '🔒 Private'}
+          </button>
         )}
         {currentSequence && (
           <button className="btn ghost" onClick={copyShareLink} title="Copy a shareable link to this composition">🔗 Link</button>
