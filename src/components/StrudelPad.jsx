@@ -193,6 +193,53 @@ const StrudelPad = forwardRef(function StrudelPad({ initialCode = '', getKitMap,
       const repl = elRef.current?.editor?.repl;
       return repl?.scheduler?.cps ?? repl?.cps ?? null;
     },
+    // Silently check whether `code` builds & queries without error — for the AI
+    // validate→repair loop. Strudel doesn't reject on a bad pattern; it *logs* the
+    // failure ([eval]/[query] error) and resolves. So we evaluate with autostart
+    // off (which still triggers the query that surfaces the error) while capturing
+    // those logs. Kit samples are prepended so s("kit-name") resolves (no false
+    // "unknown sample" errors). Returns { ok, error }.
+    validate: async (code) => {
+      const editor = elRef.current?.editor;
+      if (!editor?.repl) return { ok: false, error: 'editor not ready' };
+      const kitMap = (getKitMap?.() || {});
+      const parts = [];
+      const kitEntries = Object.entries(kitMap);
+      if (kitEntries.length) {
+        const esc = (s) => String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        parts.push(`await samples({${kitEntries.map(([k, v]) => `'${esc(k)}':'${esc(v)}'`).join(',')}})`);
+      }
+      parts.push((code || '').trim() || 'silence');
+      const full = parts.join('\n');
+      const errs = [];
+      const orig = { error: console.error, warn: console.warn, log: console.log };
+      const grab = (base) => (...args) => {
+        try {
+          // Strudel logs errors via console with %c styling, e.g.
+          // console.log('%c[query] error: …', '<css>'). Take the first arg as the
+          // message with format specifiers stripped, ignoring the trailing style
+          // args; otherwise join args (covers plain strings and Error objects).
+          const first = args[0];
+          const m = (typeof first === 'string' && /%[a-zA-Z]/.test(first))
+            ? first.replace(/%[a-zA-Z]/g, '').trim()
+            : args.map((x) => (x && x.message) || (typeof x === 'string' ? x : '')).join(' ');
+          if (m && /\[(eval|query)\][^]*error|is not a function|is not defined|cannot read prop|unexpected|syntaxerror/i.test(m)) {
+            errs.push(m.replace(/\s+/g, ' ').trim().slice(0, 180));
+          }
+        } catch { /* ignore */ }
+        base.apply(console, args);
+      };
+      console.error = grab(orig.error);
+      console.warn = grab(orig.warn);
+      console.log = grab(orig.log);
+      try { await editor.repl.evaluate(full, false); }
+      catch (e) { errs.push((e?.message || String(e)).slice(0, 180)); }
+      await new Promise((r) => setTimeout(r, 70)); // let the async query error flush
+      console.error = orig.error;
+      console.warn = orig.warn;
+      console.log = orig.log;
+      return { ok: errs.length === 0, error: errs[0] || null };
+    },
   }));
 
   return (

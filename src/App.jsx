@@ -100,6 +100,7 @@ export default function App() {
   const [aiEndpoint, setAiEndpoint] = useState(() => llm.loadEndpoint());
   const [showAiSettings, setShowAiSettings] = useState(false);
   const [aiBusy, setAiBusy] = useState(false);
+  const [aiStatus, setAiStatus] = useState(null); // { kind:'info'|'error', text } | null
 
   const flash = useCallback((msg) => {
     setStatus(msg);
@@ -487,6 +488,30 @@ export default function App() {
     setShowAiSettings(false);
     flash('AI endpoint cleared');
   };
+  const briefErr = (s) => { const t = (s || '').toString().replace(/\s+/g, ' ').trim(); return t.length > 110 ? t.slice(0, 110) + '…' : t; };
+
+  // Ask the model, then validate the result against Strudel; on failure, one
+  // repair pass (re-prompt with the error). Returns runnable code, or null (with
+  // aiStatus set to explain). Steps are surfaced via aiStatus so they're visible.
+  const generateValidated = async (instruction, code, selection) => {
+    setAiStatus({ kind: 'info', text: 'Asking the model…' });
+    let out = ((await llm.askEdit({ instruction, code, selection, kit, env, endpoint: aiEndpoint })).code || '').trim();
+    if (!out) { setAiStatus({ kind: 'error', text: 'The model returned no code.' }); return null; }
+    setAiStatus({ kind: 'info', text: 'Checking it runs…' });
+    let check = await padRef.current?.validate?.(out);
+    if (check && !check.ok) {
+      setAiStatus({ kind: 'info', text: `Didn't run (${briefErr(check.error)}) — asking for a fix…` });
+      const repair = `${instruction}\n\nYour previous attempt did not run. Error:\n${check.error}\nReturn corrected code that runs in this version of Strudel, using only functions that exist. Output only code.`;
+      const fixed = ((await llm.askEdit({ instruction: repair, code, selection, kit, env, endpoint: aiEndpoint })).code || '').trim();
+      if (fixed) { out = fixed; check = await padRef.current?.validate?.(out); }
+    }
+    if (check && !check.ok) {
+      setAiStatus({ kind: 'error', text: `Still didn't run: ${briefErr(check.error)} — not applied. Try rephrasing.` });
+      return null;
+    }
+    return out;
+  };
+
   const askAi = async (instruction) => {
     const text = (instruction || '').trim();
     if (!text) return;
@@ -494,20 +519,18 @@ export default function App() {
     const code = padRef.current?.getCode?.() ?? '';
     const sel = padRef.current?.getSelection?.() || null;
     setAiBusy(true);
-    flash('Asking AI…');
     try {
-      const { code: out } = await llm.askEdit({ instruction: text, code, selection: sel, kit, env, endpoint: aiEndpoint });
-      const clean = (out || '').trim();
-      if (!clean) { flash('AI returned no code'); return; }
-      // Provenance (transparency): record which model/endpoint made the change, and the ask.
-      const short = text.length > 60 ? text.slice(0, 60) + '…' : text;
-      pendingLabelRef.current = `AI · ${aiEndpoint.model || aiEndpoint.provider}: ${short}`;
-      if (sel) setSelection(padRef.current?.replaceSelection(clean) || null);
-      else { padRef.current?.setCode(clean); setSelection(null); }
+      const out = await generateValidated(text, code, sel);
+      if (!out) return; // aiStatus already explains
+      const label = text.length > 60 ? text.slice(0, 60) + '…' : text;
+      pendingLabelRef.current = `AI · ${aiEndpoint.model || aiEndpoint.provider}: ${label}`;
+      if (sel) setSelection(padRef.current?.replaceSelection(out) || null);
+      else { padRef.current?.setCode(out); setSelection(null); }
       padRef.current?.play(); // hear it, and snapshot the (labelled) trajectory step
+      setAiStatus({ kind: 'info', text: 'Applied ✓' });
     } catch (e) {
       pendingLabelRef.current = null;
-      flash(`AI failed: ${(e.message || '').slice(0, 120)}`);
+      setAiStatus({ kind: 'error', text: `AI failed: ${briefErr(e.message)}` });
     } finally {
       setAiBusy(false);
     }
@@ -794,6 +817,11 @@ export default function App() {
             onAsk={askAi}
             onOpenSettings={() => setShowAiSettings(true)}
           />
+          {aiStatus && (
+            <div className="muted small" style={{ margin: '-4px 0 2px', color: aiStatus.kind === 'error' ? '#e06c6c' : undefined }}>
+              {aiStatus.text}
+            </div>
+          )}
 
           <StrudelPad
             ref={padRef}

@@ -471,6 +471,16 @@ const STRUDEL_PREAMBLE = `Strudel is a JavaScript live-coding language (TidalCyc
 - Pitch: note("c e g") or n("0 2 4").scale("C:minor"). Layer with stack(a, b); one pattern per cycle with cat(a, b); arrange sections over cycles with arrange([4, a], [4, b]).
 - Signals modulate parameters: sine, saw, tri, perlin — e.g. .lpf(sine.range(300, 2000).slow(4)).`;
 
+// LLM-only idioms: composite recipes the palette doesn't cover as single concepts.
+// buildReference() appends these; the palette ignores them. Short + verified against
+// the bundled Strudel (tonal 1.2.6). Own words, own examples.
+const STRUDEL_IDIOMS = [
+  'Arpeggio — index a chord over time with n + voicing (do NOT use .arp, it errors): n("0 1 2 3").chord("<C Am F G>").voicing()',
+  'Scale run / melody: n("0 2 4 6 4 2").scale("C:minor")',
+  'Chords as blocks (voiced), add struct for rhythm: chord("<C^7 Am7 Dm7 G7>").voicing().struct("x ~ x x")',
+  'Chord + bassline from one chord pattern: chord("<C^7 Am7 Dm7 G7>").layer(x => x.struct("[~ x]*2").voicing(), x => x.rootNotes(2).note().s("sawtooth"))',
+];
+
 /**
  * A compact reference block for an LLM system prompt, built from the concept library.
  * @param {string} envId
@@ -489,10 +499,14 @@ export function buildReference(envId = 'strudel', kit = []) {
       lines.push(`- ${c.label}: ${c.explain}${ex}`);
     }
   }
+  const idioms = envId === 'strudel' && STRUDEL_IDIOMS.length
+    ? '\n\n## Idioms (prefer these; do not invent functions):\n- ' + STRUDEL_IDIOMS.join('\n- ')
+    : '';
   return [
     preamble,
     version ? `\nThis targets Strudel ~${version}; only use functions available in that version.` : '',
     '\nAvailable techniques (label: what it does — example):',
     lines.join('\n'),
+    idioms,
   ].filter(Boolean).join('\n');
 }
