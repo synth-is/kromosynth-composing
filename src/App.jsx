@@ -488,7 +488,13 @@ export default function App() {
     setShowAiSettings(false);
     flash('AI endpoint cleared');
   };
-  const briefErr = (s) => { const t = (s || '').toString().replace(/\s+/g, ' ').trim(); return t.length > 110 ? t.slice(0, 110) + '…' : t; };
+  // Keep messages readable: clip long model/runtime errors, but never clip our own
+  // connection diagnostics (mixed content / CORS), whose value is in the detail.
+  const briefErr = (s) => {
+    const t = (s || '').toString().replace(/\s+/g, ' ').trim();
+    if (/mixed content|CORS|Couldn't reach/i.test(t)) return t;
+    return t.length > 110 ? t.slice(0, 110) + '…' : t;
+  };
 
   // Ask the model, then validate the result against Strudel; on failure, one
   // repair pass (re-prompt with the error). Returns runnable code, or null (with

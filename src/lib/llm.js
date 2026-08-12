@@ -154,8 +154,13 @@ function reachHint(baseUrl) {
     const u = new URL(baseUrl);
     const pageHttps = typeof location !== 'undefined' && location.protocol === 'https:';
     const isLocal = ['localhost', '127.0.0.1', '::1'].includes(u.hostname);
-    if (pageHttps && u.protocol === 'http:' && !isLocal) {
-      return ` The page is https but the endpoint is http://${u.hostname} — browsers block that (mixed content). Run the model on localhost or put https in front of it.`;
+    if (pageHttps && u.protocol === 'http:') {
+      // Mixed content. NOTE: Chrome treats http://localhost as a secure context and
+      // allows it; Safari and Firefox do NOT — they block it like any other http
+      // origin. So flag it whenever the page is https, localhost included.
+      return isLocal
+        ? ` Blocked as mixed content: this page is https and the endpoint is http://${u.hostname}. Chrome allows http://localhost, but Safari/Firefox block it. Use the app over http (the dev server) in those browsers, put https in front of the model server, or switch to Chrome.`
+        : ` Blocked as mixed content: this page is https and the endpoint is http://${u.hostname}. Run the model on localhost (in Chrome) or put https in front of it.`;
     }
   } catch { /* ignore */ }
   return ' Is the server running with CORS enabled (and, for LM Studio, "Serve on Local Network")?';
