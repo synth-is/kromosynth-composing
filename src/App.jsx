@@ -424,6 +424,16 @@ export default function App() {
   // modal doesn't force a fresh sign-in (Live's WebView data store is ephemeral).
   const abletonResume = () => ({ token: api.getToken?.() || null, seq: currentSequence?.id || null });
 
+  /**
+   * Close the modal WITHOUT importing anything, but still hand the session back.
+   * Closing Live's modal window posts nothing, so a sign-in would otherwise be
+   * lost on every open; this posts an empty selection carrying `resume`.
+   */
+  const closeToLive = () => {
+    const ok = sendToLive({ version: 1, items: [] }, abletonResume());
+    if (!ok) flash('Not running inside Live');
+  };
+
   const sendStems = () => {
     if (!kit.length) { flash('Add sounds to the kit first'); return; }
     const ok = sendToLive(buildStemsSelection(kit), abletonResume());
@@ -681,6 +691,7 @@ export default function App() {
         {ABLETON && (
           <>
             <button className="btn" onClick={sendStems} title="Send kit sounds as stems, with their render settings">→ Live (stems)</button>
+            <button className="btn ghost" onClick={closeToLive} title="Close and stay signed in for the next open">Close</button>
             <span style={{ width: 10 }} />
           </>
         )}
