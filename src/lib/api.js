@@ -91,6 +91,10 @@ export async function fetchProfile(token) {
   return null;
 }
 
+let _lastAdoptError = null;
+/** Why the last SSO hand-off failed (the WebView has no reachable console). */
+export function getLastAdoptError() { return _lastAdoptError; }
+
 /**
  * Single-sign-on handoff. The main web app links here with the JWT in the URL
  * fragment (#token=...), which — unlike a query string — is never sent to a server
@@ -125,15 +129,26 @@ export async function adoptTokenFromHash() {
     history.replaceState(null, '', window.location.pathname + (qs ? `?${qs}` : ''));
   } catch { /* ignore */ }
 
+  _lastAdoptError = null;
   try {
-    const user = await fetchProfile(token);
+    const res = await fetch(`${AUTH_URL}/api/auth/profile`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const result = await res.json().catch(() => ({}));
+    const user = res.ok && result.success ? result.data?.user : null;
     if (user) {
       _token = token;
       _user = user;
       _persist();
       return user;
     }
-  } catch { /* ignore */ }
+    _lastAdoptError = res.ok
+      ? (result.error || 'profile returned no user')
+      : `profile HTTP ${res.status}`;
+  } catch (err) {
+    _lastAdoptError = err.message || 'network error reaching auth';
+  }
+  console.warn('[resume] token hand-off failed:', _lastAdoptError, '| auth:', AUTH_URL);
   return null;
 }
 

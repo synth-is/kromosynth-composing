@@ -116,8 +116,8 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      // Diagnostic for the Ableton resume handoff: did the token fragment and ?seq
-      // survive Live's WebView navigation?
+      // Diagnostic for the Ableton resume handoff: did the token and ?seq survive?
+      const hadToken = /[?&#]token=/.test(window.location.href);
       console.log('[resume] search:', window.location.search || '(none)',
         '| hash:', window.location.hash ? '(present)' : '(none)');
       const adopted = await api.adoptTokenFromHash();
@@ -125,6 +125,10 @@ export default function App() {
       const restored = adopted || api.restoreSession();
       console.log('[resume] signed in:', restored ? (restored.username || restored.email || 'yes') : 'no');
       setUser(restored);
+      // The modal has no reachable console — surface a failed hand-off in the UI.
+      if (hadToken && !restored) {
+        flash(`Sign-in hand-off failed: ${api.getLastAdoptError?.() || 'unknown'}`);
+      }
       try {
         // Keep ?seq in the URL so it stays shareable (composing.synth.is/?seq=<id>).
         const seq = new URLSearchParams(window.location.search).get('seq');
