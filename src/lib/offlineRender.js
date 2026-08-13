@@ -1,51 +1,61 @@
 /**
  * Non-realtime (offline) bounce of a live-coding pattern → WAV bytes.
  *
- * Strudel gained non-realtime export in `@strudel/webaudio` (renderPatternAudio,
- * merged upstream 2025-12-19 and present in 1.3.0): it renders through an
- * OfflineAudioContext, faster than realtime. We deliberately do NOT call
- * renderPatternAudio directly, because it triggers a browser download and returns
- * nothing — we need the bytes (for "→ Live" as well as "Download"). So this
- * reimplements the same ~40-line approach using the primitives superdough
- * exports, and returns the WAV instead.
+ * Renders through an OfflineAudioContext, faster than realtime.
  *
  * Why offline rather than recording the output:
  *   - works inside Ableton Live's embedded WebView (plain Web Audio, no
- *     getDisplayMedia / screen-capture, which embedded webviews don't support)
+ *     getDisplayMedia / screen capture, which embedded webviews don't support)
  *   - arbitrary length: a minutes-long drone renders faster than realtime
- *     instead of being played through in real time
  *   - deterministic and cycle-accurate (you specify begin/end cycles), with no
  *     dependence on tab focus or timer throttling
- *   - it needs nothing from the editor's own (separately bundled) audio engine
  *
- * NOTE ON ISOLATION: we render on OUR imported superdough instance with our own
- * OfflineAudioContext. The `<strudel-editor>` web component bundles its own copy
- * of superdough with its own AudioContext, so this does not disturb live
- * playback — we only borrow the *pattern object* from the editor and query it.
+ * ─────────────────────────────────────────────────────────────────────────────
+ * IMPORTANT — why this doesn't call upstream's `renderPatternAudio`, and why it
+ * never imports SuperdoughAudioController. Both roads lead to the same trap:
+ *
+ * `superdough` ships a pre-bundled `dist/index.mjs` (its package "main") AND its
+ * unbundled sources. `@strudel/webaudio` imports most things from the bare
+ * specifier `superdough` (→ dist) but is forced to deep-import
+ * `superdough/superdoughoutput.mjs` (→ source) for `SuperdoughAudioController`,
+ * because dist exports only get/setSuperdoughAudioController, not the class.
+ * Installed from npm those are TWO module instances with separate module state.
+ * So a controller built from the source class, handed to the dist instance,
+ * mixes graphs: `setAudioContext()` sets the offline context on one instance
+ * while helpers like `gainNode()` — used by the reverb/delay EFFECT SENDS — read
+ * `getAudioContext()` from the other, which is unset and therefore silently
+ * creates a LIVE AudioContext. Connecting that live gain node to the offline
+ * reverb node throws:
+ *
+ *     InvalidAccessError: cannot connect to an AudioNode belonging to a
+ *     different audio context
+ *
+ * …and every event using `room`/`delay` is dropped while dry events render fine
+ * — a silently incomplete WAV, the worst kind of bug. (Strudel's monorepo
+ * resolves `superdough` to the workspace source, so upstream never sees this;
+ * `renderPatternAudio` from the published package hits it too.)
+ *
+ * Aliasing the bare specifier to the sources doesn't work either: they import
+ * `./worklets.mjs?audioworklet`, a suffix provided by a custom Vite plugin in
+ * Strudel's monorepo ("No matching export … for import default"). That's exactly
+ * why dist exists.
+ *
+ * The way out: stay entirely inside the dist instance and never touch the class.
+ * `getSuperdoughAudioController()` lazily builds a controller with dist's OWN
+ * class on the CURRENT context — so we set the offline context, null the
+ * controller, and let superdough create it itself. One instance, one graph.
+ * ─────────────────────────────────────────────────────────────────────────────
  */
 
 import {
   superdough,
   initAudio,
-  getAudioContext,
   setAudioContext,
   setSuperdoughAudioController,
   resetGlobalEffects,
   samples,
 } from '@strudel/webaudio';
 import { encodeWavPcm16Multi } from './wav.js';
-
-// SuperdoughAudioController lives in a subpath that superdough's index doesn't
-// re-export, so it's imported lazily: a resolution problem then fails the bounce
-// with a clear message instead of breaking the whole app at load time.
-let _Controller = null;
-async function getController() {
-  if (_Controller) return _Controller;
-  const mod = await import('superdough/superdoughoutput.mjs');
-  _Controller = mod.SuperdoughAudioController;
-  if (!_Controller) throw new Error('Offline rendering is unavailable: superdough audio controller not found.');
-  return _Controller;
-}
 
 export const DEFAULT_BOUNCE = {
   fromCycle: 0,
@@ -59,17 +69,16 @@ export const DEFAULT_BOUNCE = {
  * Render `pattern` offline and return the WAV bytes.
  *
  * @param {object}   opts
- * @param {object}   opts.pattern   evaluated Strudel pattern (from the editor)
- * @param {number}   opts.cps       cycles per second (the pattern's tempo)
+ * @param {object}   opts.pattern   evaluated pattern (from the editor's scheduler)
+ * @param {number}   opts.cps       cycles per second
  * @param {number}   opts.fromCycle start cycle (inclusive)
  * @param {number}   opts.toCycle   end cycle (exclusive)
  * @param {number}   opts.sampleRate
  * @param {number}   opts.maxPolyphony
  * @param {boolean}  opts.multiChannelOrbits
- * @param {object}   [opts.kitMap]  sample map to register before rendering
- *                                  ({ name: url }), i.e. the composing kit
- * @param {(p:number)=>void} [opts.onProgress] 0..1 while scheduling events
- * @returns {Promise<{wav: Uint8Array, durationSecs: number, sampleRate: number, channels: number}>}
+ * @param {object}   [opts.kitMap]  { name: url } registered before rendering
+ * @param {(p:number)=>void} [opts.onProgress]
+ * @returns {Promise<{wav, durationSecs, sampleRate, channels, skipped, total}>}
  */
 export async function renderPatternOffline({
   pattern,
@@ -90,15 +99,17 @@ export async function renderPatternOffline({
   const frames = Math.ceil((cycles / cps) * sampleRate);
   if (!Number.isFinite(frames) || frames <= 0) throw new Error('Invalid bounce length.');
 
-  // Keep whatever context our instance had, so a bounce leaves it as it found it.
-  let previous = null;
-  try { previous = getAudioContext(); } catch { /* none yet */ }
-
   const ctx = new OfflineAudioContext(2, frames, sampleRate);
-  const Controller = await getController();
   setAudioContext(ctx);
-  setSuperdoughAudioController(new Controller(ctx));
+  // Null it so superdough lazily rebuilds the controller with ITS OWN class on
+  // THIS context (see the header note) — never construct one ourselves.
+  setSuperdoughAudioController(null);
+  // Effect/orbit nodes are cached and bound to the context that built them; clear
+  // any left over from a previous render before we start.
+  try { resetGlobalEffects(); } catch { /* ignore */ }
 
+  let skipped = 0;
+  let total = 0;
   try {
     await initAudio({ maxPolyphony, multiChannelOrbits });
 
@@ -108,12 +119,13 @@ export async function renderPatternOffline({
       await samples(kitMap);
     }
 
-    // Schedule every event in ascending onset order: controls that depend on the
-    // audio-graph state (e.g. `cut`) need it, and times are relative to fromCycle.
+    // Schedule in ascending onset order: controls that depend on audio-graph
+    // state (e.g. `cut`) need it, and times are relative to fromCycle.
     const haps = pattern
       .queryArc(fromCycle, toCycle, { _cps: cps })
-      .filter((h) => h.hasOnset?.() ?? !!h.whole)
+      .filter((h) => (h.hasOnset ? h.hasOnset() : !!h.whole))
       .sort((a, b) => a.whole.begin.valueOf() - b.whole.begin.valueOf());
+    total = haps.length;
 
     for (let i = 0; i < haps.length; i++) {
       const hap = haps[i];
@@ -122,8 +134,10 @@ export async function renderPatternOffline({
         const onset = (hap.whole.begin.valueOf() - fromCycle) / cps;
         await superdough(hap.value, onset, hap.duration / cps, cps, onset);
       } catch (err) {
-        // One bad event shouldn't abort the whole bounce (matches upstream).
-        console.warn('[bounce] skipped an event:', err);
+        // One bad event shouldn't abort the whole bounce, but count them so the
+        // UI can warn rather than hand back a silently incomplete file.
+        skipped++;
+        console.warn('[bounce] skipped an event:', err, hap.value);
       }
       if (onProgress && (i % 25 === 0 || i === haps.length - 1)) {
         onProgress(haps.length ? (i + 1) / haps.length : 1);
@@ -138,12 +152,14 @@ export async function renderPatternOffline({
       durationSecs: buffer.duration,
       sampleRate: buffer.sampleRate,
       channels: buffer.numberOfChannels,
+      skipped,
+      total,
     };
   } finally {
-    // Rendering swaps global audio state; put it back so later bounces are clean.
-    try { setSuperdoughAudioController(previous && _Controller ? new _Controller(previous) : null); } catch { /* ignore */ }
-    try { setAudioContext(previous || null); } catch { /* ignore */ }
+    // Drop everything bound to this render's context so the next bounce is clean.
     try { resetGlobalEffects(); } catch { /* ignore */ }
+    try { setSuperdoughAudioController(null); } catch { /* ignore */ }
+    try { setAudioContext(null); } catch { /* ignore */ }
   }
 }
 

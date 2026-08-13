@@ -11,10 +11,13 @@ export default defineConfig({
     port: 5273, // distinct from kromosynth-desktop's default (5173)
   },
   resolve: {
-    // The app imports @strudel/webaudio directly (src/lib/bounce.js taps the
-    // superdough master output to record a bounce). Force a SINGLE instance so it
-    // shares the audio-controller singleton with @strudel/repl — otherwise the
-    // bounce records silence. See docs/ABLETON_BRIDGE.md.
+    // NOTE: don't try to alias the bare `superdough` specifier to its unbundled
+    // sources to unify it with the `superdough/superdoughoutput.mjs` deep import
+    // that @strudel/webaudio uses -- the sources rely on a `?audioworklet` import
+    // suffix provided by a custom Vite plugin in Strudel's monorepo, so they can't
+    // be consumed directly ("No matching export ... for import default"). That's
+    // why the package ships `dist`. The offline bounce instead stays entirely
+    // within the dist instance; see src/lib/offlineRender.js.
     dedupe: ['@strudel/webaudio', 'superdough', '@strudel/core'],
   },
   // @strudel/repl ships its own worklets/wasm; let Vite pre-bundle it normally.

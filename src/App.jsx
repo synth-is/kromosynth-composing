@@ -434,7 +434,7 @@ export default function App() {
     setBounceProgress(0);
     try {
       flash('Bouncing offline…');
-      const { wav, durationSecs } = await env.renderOffline({
+      const { wav, durationSecs, skipped, total } = await env.renderOffline({
         pattern,
         cps,
         fromCycle,
@@ -444,6 +444,7 @@ export default function App() {
         onProgress: setBounceProgress,
       });
       const secs = durationSecs.toFixed(1);
+      const warn = skipped ? ` ⚠ ${skipped}/${total} events skipped — see console` : '';
       const base = (currentSequence?.title || 'composition').replace(/[^\w.-]+/g, '-').toLowerCase();
       if (target === 'live') {
         // Long bounces shouldn't ride as a base64 string in the message payload;
@@ -462,10 +463,10 @@ export default function App() {
             wavBase64: bytesToBase64(wav),
           }],
         });
-        flash(ok ? `Sent ${secs}s bounce to Live` : 'Not in Live — bounce logged to console');
+        flash(ok ? `Sent ${secs}s bounce to Live${warn}` : 'Not in Live — bounce logged to console');
       } else {
         downloadWav(wav, `${base}-${fromCycle}-${toCycle}.wav`);
-        flash(`Bounced ${secs}s — downloaded`);
+        flash(`Bounced ${secs}s — downloaded${warn}`);
       }
     } catch (e) {
       flash(`Bounce failed: ${(e.message || '').slice(0, 140)}`);
