@@ -95,6 +95,22 @@ let _lastAdoptError = null;
 /** Why the last SSO hand-off failed (the WebView has no reachable console). */
 export function getLastAdoptError() { return _lastAdoptError; }
 
+// The hand-off is ONE-SHOT: the token is read from the URL and stripped straight
+// away. React StrictMode runs mount effects twice in dev, so the second run would
+// find no token, fall back to an empty localStorage, and report "signed out" while
+// the first run's result was discarded by its `cancelled` guard. Memoise the
+// adoption so every caller awaits the same outcome.
+let _adoptPromise = null;
+let _sawHandoffToken = false;
+/** True if a token arrived in the URL this page load (survives the URL strip). */
+export function sawHandoffToken() { return _sawHandoffToken; }
+
+export function adoptTokenFromHash() {
+  if (_user && _token) return Promise.resolve(_user);
+  if (!_adoptPromise) _adoptPromise = _adoptTokenOnce();
+  return _adoptPromise;
+}
+
 /**
  * Single-sign-on handoff. The main web app links here with the JWT in the URL
  * fragment (#token=...), which — unlike a query string — is never sent to a server
@@ -104,7 +120,7 @@ export function getLastAdoptError() { return _lastAdoptError; }
  * passes the token as `?token=` instead; we accept both and strip whichever was
  * used immediately (keeping any other params, e.g. ?seq).
  */
-export async function adoptTokenFromHash() {
+async function _adoptTokenOnce() {
   let token = null;
   try {
     const hash = window.location.hash.replace(/^#/, '');
@@ -119,6 +135,7 @@ export async function adoptTokenFromHash() {
     } catch { /* ignore */ }
   }
   if (!token) return null;
+  _sawHandoffToken = true;
 
   // Strip the token from the URL immediately, regardless of outcome — but keep
   // the other query params (?seq) so the composition still loads / stays shareable.

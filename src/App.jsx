@@ -126,7 +126,7 @@ export default function App() {
       console.log('[resume] signed in:', restored ? (restored.username || restored.email || 'yes') : 'no');
       setUser(restored);
       // The modal has no reachable console — surface a failed hand-off in the UI.
-      if (hadToken && !restored) {
+      if ((hadToken || api.sawHandoffToken?.()) && !restored) {
         flash(`Sign-in hand-off failed: ${api.getLastAdoptError?.() || 'unknown'}`);
       }
       try {
