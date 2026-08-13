@@ -116,9 +116,15 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      // Diagnostic for the Ableton resume handoff: did the token fragment and ?seq
+      // survive Live's WebView navigation?
+      console.log('[resume] search:', window.location.search || '(none)',
+        '| hash:', window.location.hash ? '(present)' : '(none)');
       const adopted = await api.adoptTokenFromHash();
       if (cancelled) return;
-      setUser(adopted || api.restoreSession());
+      const restored = adopted || api.restoreSession();
+      console.log('[resume] signed in:', restored ? (restored.username || restored.email || 'yes') : 'no');
+      setUser(restored);
       try {
         // Keep ?seq in the URL so it stays shareable (composing.synth.is/?seq=<id>).
         const seq = new URLSearchParams(window.location.search).get('seq');
@@ -414,9 +420,13 @@ export default function App() {
   };
 
   // --- Ableton ---
+  // Session + current composition, handed back to the extension so reopening the
+  // modal doesn't force a fresh sign-in (Live's WebView data store is ephemeral).
+  const abletonResume = () => ({ token: api.getToken?.() || null, seq: currentSequence?.id || null });
+
   const sendStems = () => {
     if (!kit.length) { flash('Add sounds to the kit first'); return; }
-    const ok = sendToLive(buildStemsSelection(kit));
+    const ok = sendToLive(buildStemsSelection(kit), abletonResume());
     if (!ok) flash('Not running inside Live — payload logged to console');
   };
   /**
@@ -462,7 +472,7 @@ export default function App() {
             duration: durationSecs,
             wavBase64: bytesToBase64(wav),
           }],
-        });
+        }, abletonResume());
         flash(ok ? `Sent ${secs}s bounce to Live${warn}` : 'Not in Live — bounce logged to console');
       } else {
         downloadWav(wav, `${base}-${fromCycle}-${toCycle}.wav`);

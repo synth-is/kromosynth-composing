@@ -41,16 +41,31 @@ export function buildStemsSelection(kit) {
   return { version: 1, items };
 }
 
-/** Post a Selection back to the host extension and close the modal. */
-export function sendToLive(selection) {
-  const msg = { method: 'close_and_send', params: [JSON.stringify(selection)] };
+/** Post a Selection back to the host extension and close the modal.
+ *
+ * `resume` carries the signed-in token and the current composition id. Live opens
+ * each modal in a FRESH WebView with an ephemeral data store, so localStorage
+ * (where the JWT lives) does not survive between opens — without this you'd have
+ * to sign in again every time. The extension keeps it for the session and hands
+ * it back on the next open as `#token=…` / `?seq=…`, which the app already knows
+ * how to consume (adoptTokenFromHash / the ?seq deep link).
+ */
+export function sendToLive(selection, resume) {
+  const payload = resume && (resume.token || resume.seq) ? { ...selection, resume } : selection;
+  console.log('[ableton] sending to Live:', {
+    items: payload.items?.length ?? 0,
+    signedIn: !!resume?.token,
+    seq: resume?.seq || '(none)',
+    resumeIncluded: !!payload.resume,
+  });
+  const msg = { method: 'close_and_send', params: [JSON.stringify(payload)] };
   if (window.webkit?.messageHandlers?.live) {
     window.webkit.messageHandlers.live.postMessage(msg);
   } else if (window.chrome?.webview) {
     window.chrome.webview.postMessage(msg);
   } else {
     // Not inside Live — useful for testing the payload in a normal browser.
-    console.warn('[ableton] no host bridge found; would send:', selection);
+    console.warn('[ableton] no host bridge found; would send:', payload);
     return false;
   }
   return true;
