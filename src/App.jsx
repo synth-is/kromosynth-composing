@@ -434,6 +434,29 @@ export default function App() {
     if (!ok) flash('Not running inside Live');
   };
 
+  // Esc (and the modal being torn down) otherwise closes Live's dialog without the
+  // page posting anything, losing the sign-in. Post the resume first so the next
+  // open picks it up. Esc while one of our own dialogs is open should close THAT,
+  // so only act when none is showing.
+  const anyDialogOpen = showLogin || showSave || showOpen || showBounce || showConcepts;
+  useEffect(() => {
+    if (!ABLETON) return undefined;
+    const postResume = () => {
+      const r = abletonResume();
+      if (r.token || r.seq) sendToLive({ version: 1, items: [] }, r);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape' && !anyDialogOpen) postResume();
+    };
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('pagehide', postResume);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('pagehide', postResume);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [anyDialogOpen, user, currentSequence]);
+
   const sendStems = () => {
     if (!kit.length) { flash('Add sounds to the kit first'); return; }
     const ok = sendToLive(buildStemsSelection(kit), abletonResume());
