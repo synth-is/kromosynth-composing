@@ -92,9 +92,13 @@ export async function fetchProfile(token) {
 }
 
 /**
- * Single-sign-on handoff from the main app: it links here with the JWT in the URL
+ * Single-sign-on handoff. The main web app links here with the JWT in the URL
  * fragment (#token=...), which — unlike a query string — is never sent to a server
- * or written to logs. We adopt it, fetch the profile, persist a session, strip the hash.
+ * or written to logs. We adopt it, fetch the profile, persist a session, strip it.
+ *
+ * Ableton's modal WebView DROPS the fragment when it navigates, so the extension
+ * passes the token as `?token=` instead; we accept both and strip whichever was
+ * used immediately (keeping any other params, e.g. ?seq).
  */
 export async function adoptTokenFromHash() {
   let token = null;
@@ -105,10 +109,21 @@ export async function adoptTokenFromHash() {
       token = params.get('token') || params.get('access_token');
     }
   } catch { /* ignore */ }
+  if (!token) {
+    try {
+      token = new URLSearchParams(window.location.search).get('token');
+    } catch { /* ignore */ }
+  }
   if (!token) return null;
 
-  // Strip the token from the URL immediately, regardless of outcome.
-  try { history.replaceState(null, '', window.location.pathname + window.location.search); } catch { /* ignore */ }
+  // Strip the token from the URL immediately, regardless of outcome — but keep
+  // the other query params (?seq) so the composition still loads / stays shareable.
+  try {
+    const params = new URLSearchParams(window.location.search);
+    params.delete('token');
+    const qs = params.toString();
+    history.replaceState(null, '', window.location.pathname + (qs ? `?${qs}` : ''));
+  } catch { /* ignore */ }
 
   try {
     const user = await fetchProfile(token);
