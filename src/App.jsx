@@ -4,7 +4,8 @@ import * as api from './lib/api.js';
 import { getEvoRunId, isDefaultSettings, DEFAULT_RENDER } from './lib/render.js';
 import { makeSnapshot, appendSnapshot, snapshotLabel } from './lib/trajectory.js';
 import { isAbletonHost, buildStemsSelection, sendToLive } from './lib/ableton.js';
-import { bounceToWav, bytesToBase64 } from './lib/bounce.js';
+import { bytesToBase64 } from './lib/wav.js';
+import { downloadWav, DEFAULT_BOUNCE } from './lib/offlineRender.js';
 import { renderToWavUrl } from './lib/renderClient.js';
 import { getEnvironment } from './lib/environments.js';
 import { conceptsByCategory, conceptNames, transforms as conceptTransforms, explainConcepts } from './lib/concepts.js';
@@ -88,6 +89,8 @@ export default function App() {
   const [showSave, setShowSave] = useState(false);
   const [showOpen, setShowOpen] = useState(false);
   const [showBounce, setShowBounce] = useState(false);
+  const [bouncing, setBouncing] = useState(false);
+  const [bounceProgress, setBounceProgress] = useState(0);
   const [currentSequence, setCurrentSequence] = useState(null); // { id, title, description, visibility, tags }
   const [saveInitialTitle, setSaveInitialTitle] = useState('');
   const [pendingOpenId, setPendingOpenId] = useState(null); // ?seq=<id> deep link
@@ -416,20 +419,59 @@ export default function App() {
     const ok = sendToLive(buildStemsSelection(kit));
     if (!ok) flash('Not running inside Live — payload logged to console');
   };
-  const runBounce = async (seconds) => {
+  /**
+   * Offline (non-realtime) bounce: render the evaluated pattern through an
+   * OfflineAudioContext — faster than realtime, deterministic, cycle-accurate, and
+   * it works inside Live's embedded WebView (no screen/tab capture involved).
+   * target: 'download' | 'live'
+   */
+  const runBounce = async ({ fromCycle, toCycle, sampleRate, target }) => {
+    const pattern = padRef.current?.getPattern?.();
+    const cps = padRef.current?.getCps?.();
+    if (!pattern) { flash('Press Play once so there’s a pattern to bounce'); return; }
+    if (!env.renderOffline) { flash('This environment can’t bounce offline'); return; }
+    setBouncing(true);
+    setBounceProgress(0);
     try {
-      flash('Bouncing…');
-      const { wav, durationSecs } = await bounceToWav({ padRef, seconds });
-      const wavBase64 = bytesToBase64(wav);
-      const ok = sendToLive({
-        version: 1,
-        items: [{ soundId: 'composition', name: 'Composition', duration: durationSecs, wavBase64 }],
+      flash('Bouncing offline…');
+      const { wav, durationSecs } = await env.renderOffline({
+        pattern,
+        cps,
+        fromCycle,
+        toCycle,
+        sampleRate,
+        kitMap: getKitMap(),
+        onProgress: setBounceProgress,
       });
-      // NB: landing this in Live needs the extension's wavBase64 short-circuit
-      // (see docs/ABLETON_BRIDGE.md); stems export works without it.
-      flash(ok ? 'Sent bounce to Live' : 'Not in Live — bounce logged to console');
+      const secs = durationSecs.toFixed(1);
+      const base = (currentSequence?.title || 'composition').replace(/[^\w.-]+/g, '-').toLowerCase();
+      if (target === 'live') {
+        // Long bounces shouldn't ride as a base64 string in the message payload;
+        // see docs/ABLETON_BRIDGE.md for the file/URL hand-off that lifts this.
+        if (wav.length > 40 * 1024 * 1024) {
+          flash(`Bounce is ${(wav.length / 1048576) | 0} MB — too big to send inline. Download it and drag it into Live.`);
+          downloadWav(wav, `${base}-${fromCycle}-${toCycle}.wav`);
+          return;
+        }
+        const ok = sendToLive({
+          version: 1,
+          items: [{
+            soundId: 'composition',
+            name: currentSequence?.title || 'Composition',
+            duration: durationSecs,
+            wavBase64: bytesToBase64(wav),
+          }],
+        });
+        flash(ok ? `Sent ${secs}s bounce to Live` : 'Not in Live — bounce logged to console');
+      } else {
+        downloadWav(wav, `${base}-${fromCycle}-${toCycle}.wav`);
+        flash(`Bounced ${secs}s — downloaded`);
+      }
     } catch (e) {
-      flash(e.message?.slice(0, 140) || 'Bounce failed');
+      flash(`Bounce failed: ${(e.message || '').slice(0, 140)}`);
+    } finally {
+      setBouncing(false);
+      setBounceProgress(0);
     }
   };
 
@@ -627,11 +669,13 @@ export default function App() {
         <div className="spacer" />
         {ABLETON && (
           <>
-            <button className="btn ghost" onClick={() => setShowBounce(true)} title="Bounce the composition to one clip">→ Live (bounce)</button>
             <button className="btn" onClick={sendStems} title="Send kit sounds as stems, with their render settings">→ Live (stems)</button>
             <span style={{ width: 10 }} />
           </>
         )}
+        <button className="btn ghost" onClick={() => setShowBounce(true)} title="Render the pattern to a WAV (offline, faster than realtime)">
+          {bouncing ? `Bouncing… ${Math.round(bounceProgress * 100)}%` : 'Bounce…'}
+        </button>
         <button className="btn ghost" onClick={() => setShowOpen(true)} disabled={!user}>Open…</button>
         {currentSequence && (
           <span className="who current-seq" title="Current composition">{currentSequence.title}</span>
@@ -847,8 +891,9 @@ export default function App() {
       {showBounce && (
         <BounceDialog
           cps={padRef.current?.getCps?.()}
+          ableton={ABLETON}
           onClose={() => setShowBounce(false)}
-          onBounce={(secs) => { setShowBounce(false); runBounce(secs); }}
+          onBounce={(opts) => { setShowBounce(false); runBounce(opts); }}
         />
       )}
       {showConcepts && (
@@ -1203,35 +1248,52 @@ function OpenDialog({ onClose, onOpen }) {
   );
 }
 
-function BounceDialog({ cps, onClose, onBounce }) {
+function BounceDialog({ cps, ableton, onClose, onBounce }) {
   const hasCps = typeof cps === 'number' && cps > 0;
-  const [cycles, setCycles] = useState(4);
-  const [seconds, setSeconds] = useState(8);
-  const secs = hasCps ? cycles / cps : seconds;
+  const [fromCycle, setFromCycle] = useState(DEFAULT_BOUNCE.fromCycle);
+  const [toCycle, setToCycle] = useState(DEFAULT_BOUNCE.toCycle);
+  const [sampleRate, setSampleRate] = useState(DEFAULT_BOUNCE.sampleRate);
+  const cycles = Math.max(0, toCycle - fromCycle);
+  const secs = hasCps ? cycles / cps : null;
+  const valid = cycles > 0 && sampleRate >= 8000;
+  const opts = { fromCycle, toCycle, sampleRate };
   return (
-    <Modal title="Bounce composition to Live" onClose={onClose}>
-      <p className="muted small">
-        Records the live Strudel output in real time, then sends it to Live as one audio clip.
+    <Modal title="Bounce to WAV" onClose={onClose}>
+      <p className="muted small" style={{ marginTop: 0 }}>
+        Renders the pattern <em>offline</em> — faster than realtime, so long pieces don’t play
+        through in real time, and the result is deterministic and cycle-accurate.
       </p>
-      {hasCps ? (
-        <>
-          <label className="field">Length (cycles)
-            <input type="number" min="1" step="1" value={cycles}
-              onChange={(e) => setCycles(Math.max(1, Number(e.target.value) || 1))} autoFocus />
-          </label>
-          <div className="muted small" style={{ marginBottom: 12 }}>
-            ≈ {secs.toFixed(2)} s at the current tempo (cps {cps.toFixed(3)}). A whole number of cycles loops cleanly in Live.
-          </div>
-        </>
-      ) : (
-        <label className="field">Length (seconds)
-          <input type="number" min="1" step="1" value={seconds}
-            onChange={(e) => setSeconds(Math.max(1, Number(e.target.value) || 1))} autoFocus />
+      <div className="settings-grid">
+        <label className="field">Start cycle
+          <input type="number" min="0" step="1" value={fromCycle}
+            onChange={(e) => setFromCycle(Math.max(0, Number(e.target.value) || 0))} autoFocus />
         </label>
-      )}
+        <label className="field">End cycle
+          <input type="number" min="1" step="1" value={toCycle}
+            onChange={(e) => setToCycle(Math.max(1, Number(e.target.value) || 1))} />
+        </label>
+        <label className="field">Sample rate
+          <select value={sampleRate} onChange={(e) => setSampleRate(Number(e.target.value))}>
+            <option value={44100}>44100</option>
+            <option value={48000}>48000</option>
+            <option value={96000}>96000</option>
+          </select>
+        </label>
+      </div>
+      <div className="muted small" style={{ margin: '4px 0 12px' }}>
+        {cycles} cycle{cycles === 1 ? '' : 's'}
+        {secs != null ? ` ≈ ${secs.toFixed(2)} s at the current tempo (cps ${cps.toFixed(3)})` : ' — press Play once to read the tempo'}.
+        A whole number of cycles loops cleanly.
+      </div>
       <div className="modal-actions">
         <button className="btn ghost" onClick={onClose}>Cancel</button>
-        <button className="btn" onClick={() => onBounce(secs)}>Bounce &amp; send</button>
+        <span className="spacer" />
+        {ableton && (
+          <button className="btn" disabled={!valid} onClick={() => onBounce({ ...opts, target: 'live' })}>→ Live</button>
+        )}
+        <button className={ableton ? 'btn ghost' : 'btn'} disabled={!valid} onClick={() => onBounce({ ...opts, target: 'download' })}>
+          Download WAV
+        </button>
       </div>
     </Modal>
   );

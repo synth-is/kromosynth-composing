@@ -172,6 +172,12 @@ const StrudelPad = forwardRef(function StrudelPad({ initialCode = '', getKitMap,
     // freshly re-rendered sound is picked up live without a manual re-Play.
     reevaluate: () => { if (isPlaying) doPlay(); },
     isReady: () => readyRef.current,
+    // The evaluated pattern + tempo, for an offline (non-realtime) bounce.
+    // The Cyclist scheduler holds both once the code has been evaluated.
+    getPattern: () => {
+      const sched = elRef.current?.editor?.repl?.scheduler;
+      return sched?.pattern || null;
+    },
     getSelection: () => {
       const sel = readSelection();
       return sel && sel.from !== sel.to ? sel : null;

@@ -10,12 +10,22 @@
  *   hints(kit)          -> copyable teaching snippets (parameterised by the kit)
  *   makeStarter(kit)    -> one valid, playable pattern to get off the blank page
  *   makeRandom(kit)     -> a random playable pattern ("surprise me")
+ *   renderOffline(opts)  -> optional: non-realtime bounce to WAV bytes
+ *
+ * `renderOffline` is the engine-agnostic bounce capability: given the current
+ * pattern/program plus a cycle range and sample rate, render FASTER THAN REALTIME
+ * and return WAV bytes. Strudel implements it with an OfflineAudioContext; Csound
+ * and ChucK both have non-realtime rendering natively, so each new environment can
+ * supply its own implementation and the Bounce UI keeps working unchanged. Absent
+ * on an environment = no bounce offered for that language.
  *
  * Note on examples: we deliberately generate snippets from the user's own kit
  * sample names rather than copying examples from the Strudel docs — it teaches
  * the same idioms, works with the sounds actually loaded, and keeps us clear of
  * reproducing documentation. The docsUrl links out for the full language.
  */
+
+import { renderPatternOffline } from './offlineRender.js';
 
 function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 function randInt(min, max) { return min + Math.floor(Math.random() * (max - min + 1)); }
@@ -71,6 +81,9 @@ const strudel = {
     const lines = Array.from({ length: layers }, line);
     return layers === 1 ? lines[0].trim() : `stack(\n${lines.join(',\n')}\n)`;
   },
+
+  // Non-realtime bounce (see lib/offlineRender.js).
+  renderOffline: renderPatternOffline,
 };
 
 const ENVIRONMENTS = { strudel };

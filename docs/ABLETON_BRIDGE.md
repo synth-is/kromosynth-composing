@@ -38,37 +38,64 @@ rendered, to re-sequence with Live's tools.
 - **Extension side:** needs only a way to *open the composing app* in Live (see
   "Launching" below). No change to `renderSource`/`inject`.
 
-## Option B — bounce the composition to one audio clip  ⏳ needs extension work
+## Option B — bounce the composition to one audio clip  ✅ offline render (current)
 
 Bring the actual sequenced result (the thing Live can't easily reproduce) as a
-single audio clip: the app renders the Strudel pattern to a WAV and hands *that*
-audio to the extension.
+single audio clip: the app renders the pattern to a WAV and hands *that* audio to the
+extension.
 
-Two pieces are required:
+### How it renders: OfflineAudioContext, faster than realtime
 
-1. **Extension: accept provided audio.** Extend `SelectionItem` with an optional
-   inline buffer and short-circuit rendering:
-   ```ts
-   // types.ts
-   interface SelectionItem { …; wavBase64?: string; /* pre-rendered audio */ }
-   // renderSource.ts::renderItemToWav
-   if (item.wavBase64) return Buffer.from(item.wavBase64, 'base64');
-   ```
-   `injectClips` then imports it like any other WAV (a single item → one clip;
-   `mode: 'tracks'` or `'arrangement'` both work). ~15 lines total. For large
-   bounces, prefer a loopback-URL variant (mirror `refAudio.ts`'s local server) over
-   base64 in the `close_and_send` payload.
+`src/lib/offlineRender.js` renders the evaluated pattern through an
+**`OfflineAudioContext`** and returns WAV bytes. Two earlier approaches were tried and
+rejected — worth recording so they aren't re-attempted:
 
-2. **App: render Strudel → WAV.** Strudel has no one-call offline bounce, so the
-   pragmatic v1 is **real-time capture**: tap the Strudel REPL's audio output into a
-   `MediaStreamAudioDestinationNode`, record N cycles with `MediaRecorder`, decode →
-   PCM → `encodeWavPcm16`. This needs a handle on Strudel's AudioContext/output node
-   (via `<strudel-editor>`'s `editor.repl`) — the one unknown to verify at runtime.
-   A deterministic offline bounce (query the pattern's events over a cycle range and
-   schedule into an `OfflineAudioContext`) is the nicer follow-up.
+| approach | verdict |
+|---|---|
+| Tap superdough's master (`destinationGain`) + `MediaRecorder` | ❌ The `<strudel-editor>` component bundles **its own** superdough with its own AudioContext, so the tap was on a different, silent instance. Vite `resolve.dedupe` can't unify code already baked into a dependency's dist. |
+| `getDisplayMedia({audio:true})` tab capture | ❌ The Screen Capture API isn't available in **embedded webviews** — and this UI runs inside Live's modal WebView (`showModalDialog`, WKWebView/WebView2). Also needs a permission prompt. |
+| **OfflineAudioContext render** | ✅ Plain Web Audio (works in the WebView, no permissions), **faster than realtime** so minutes-long drones are practical, deterministic and cycle-accurate, and needs nothing from the editor's own audio engine. |
 
-The app already stubs the entry point ("→ Live (bounce)" button) so wiring is
-localized once the capture handle is confirmed.
+Upstream Strudel added non-realtime export in `@strudel/webaudio` (`renderPatternAudio`,
+merged 2025-12-19, shipped in **1.3.0** — already the pinned version here, so no upgrade
+was needed). We deliberately don't call it directly: it triggers a browser download and
+returns nothing, while we need the bytes. `offlineRender.js` reimplements the same
+approach with superdough's exported primitives and returns the WAV.
+
+Mechanics: take the evaluated `pattern` + `cps` from the editor's scheduler
+(`repl.scheduler.pattern` / `.cps`), create an `OfflineAudioContext` sized
+`((toCycle - fromCycle) / cps) * sampleRate`, point **our** superdough instance at it,
+re-register the kit samples there, schedule every hap in ascending onset order,
+`startRendering()`, encode interleaved 16-bit WAV. Global audio state is restored in a
+`finally`. Rendering on our own instance means live playback in the editor is untouched.
+
+**UI:** `Bounce…` (start cycle / end cycle / sample rate, with a live seconds estimate)
+→ **Download WAV** always, plus **→ Live** inside the extension.
+
+### Engine-agnostic by design
+
+`renderOffline` is an optional capability on the environment interface
+(`src/lib/environments.js`). Strudel implements it via `OfflineAudioContext`; Csound and
+WebChucK both have non-realtime rendering natively, so each future language supplies its
+own implementation and the Bounce UI keeps working unchanged. This is a better boundary
+than an app-owned shared AudioContext, since it doesn't require every engine to accept an
+injected context.
+
+### Extension side  ✅ done
+
+`SelectionItem` gained an optional `wavBase64`, and `renderSource.ts::renderItemToWav`
+short-circuits when it's present:
+```ts
+if (item.wavBase64) return Buffer.from(item.wavBase64, "base64");
+```
+`injectClips` then imports it like any other WAV (single item → one clip; `tracks` and
+`arrangement` both work). `soundId` is a placeholder in this case.
+
+### Known limitation: payload size for long bounces
+
+Base64 inflates bytes ~33%, so a multi-minute WAV is impractical inline — the app
+refuses above ~40 MB and downloads instead. **TODO:** accept a file path / loopback URL
+(mirroring `refAudio.ts`'s local server) so length is bounded by disk, not string size.
 
 ## Launching the composing app from Live
 
@@ -78,10 +105,13 @@ picker. Add a command + context-menu action that opens
 `close_and_send` handshake), e.g. `synthis.compose.tracks` / `.arrangement`. The
 target (`InjectTarget`) is chosen exactly as the discovery commands already do.
 
-## Recommendation
+## Status
 
-Ship **Option A** first (app side is done; extension side is just the launcher).
-It exercises the whole loop and delivers the "raw sounds with correct settings"
-use case immediately. **Option B** follows once the Strudel output tap is confirmed
-— it's the higher-value "sequencing Live can't replicate" path, and the extension
-change is tiny.
+Both options are implemented app-side, and the extension accepts both shapes.
+**Option A (stems)** needs the extension rebuilt with `SYNTHIS_COMPOSE_UI_URL` set (and
+`SYNTHIS_PREVIEW_WS_URL=wss://render.synth.is` — the config fallback points at the stale
+`preview.synth.is`). **Option B (bounce)** works via the offline render; only the
+large-payload hand-off (file/URL instead of base64) remains as a TODO.
+
+The now-unused realtime capture helper (`src/lib/bounce.js`) is superseded by
+`offlineRender.js` and can be deleted.
