@@ -62,6 +62,24 @@ export function providerMeta(id) {
   return PROVIDERS.find((p) => p.id === id) || PROVIDERS[0];
 }
 
+// A code rewrite is bounded work: cap it. Without a ceiling, local servers (LM
+// Studio defaults to unlimited) will happily run a repetition loop for tens of
+// thousands of tokens — which is exactly what happens when a follow-up request
+// feeds the model its own previous output.
+const MAX_TOKENS = 2048;
+const DEFAULT_TIMEOUT_MS = 120000;
+
+/** Abort signal that fires on the caller's signal OR after `ms`. */
+function abortAfter(ms, outerSignal) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(new Error('timeout')), ms);
+  if (outerSignal) {
+    if (outerSignal.aborted) ctrl.abort(outerSignal.reason);
+    else outerSignal.addEventListener('abort', () => ctrl.abort(outerSignal.reason), { once: true });
+  }
+  return { signal: ctrl.signal, cleanup: () => clearTimeout(timer) };
+}
+
 /** Load the user's saved endpoint config (or null). */
 export function loadEndpoint() {
   try {
@@ -166,24 +184,36 @@ function reachHint(baseUrl) {
   return ' Is the server running with CORS enabled (and, for LM Studio, "Serve on Local Network")?';
 }
 
-async function callOpenAICompatible({ baseUrl, apiKey, model, system, user }) {
+async function callOpenAICompatible({ baseUrl, apiKey, model, system, user, signal, timeoutMs }) {
   const url = baseUrl.replace(/\/+$/, '') + '/chat/completions';
   const headers = { 'Content-Type': 'application/json' };
   if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+  const { signal: sig, cleanup } = abortAfter(timeoutMs || DEFAULT_TIMEOUT_MS, signal);
   let res;
   try {
     res = await fetch(url, {
       method: 'POST',
       headers,
+      signal: sig,
       body: JSON.stringify({
         model,
         messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
         temperature: 0.4,
+        // Hard ceiling: see MAX_TOKENS. Servers that ignore max_tokens may still
+        // run long, but the abort signal above bounds the wait either way.
+        max_tokens: MAX_TOKENS,
         stream: false,
       }),
     });
-  } catch {
+  } catch (err) {
+    if (sig.aborted) {
+      throw new Error(
+        'The model stopped responding (timed out). Small local models can get stuck repeating themselves — try a shorter instruction, or select just the part you want changed.',
+      );
+    }
     throw new Error(`Couldn't reach the model at ${baseUrl}.` + reachHint(baseUrl));
+  } finally {
+    cleanup();
   }
   if (!res.ok) {
     const body = await res.text().catch(() => '');
@@ -195,12 +225,14 @@ async function callOpenAICompatible({ baseUrl, apiKey, model, system, user }) {
   return content;
 }
 
-async function callAnthropic({ baseUrl, apiKey, model, system, user }) {
+async function callAnthropic({ baseUrl, apiKey, model, system, user, signal, timeoutMs }) {
   const url = (baseUrl || 'https://api.anthropic.com').replace(/\/+$/, '') + '/v1/messages';
+  const { signal: sig, cleanup } = abortAfter(timeoutMs || DEFAULT_TIMEOUT_MS, signal);
   let res;
   try {
     res = await fetch(url, {
       method: 'POST',
+      signal: sig,
       headers: {
         'Content-Type': 'application/json',
         'x-api-key': apiKey,
@@ -210,13 +242,16 @@ async function callAnthropic({ baseUrl, apiKey, model, system, user }) {
       },
       body: JSON.stringify({
         model,
-        max_tokens: 2048,
+        max_tokens: MAX_TOKENS,
         system,
         messages: [{ role: 'user', content: user }],
       }),
     });
-  } catch {
+  } catch (err) {
+    if (sig.aborted) throw new Error('Anthropic stopped responding (timed out).');
     throw new Error(`Couldn't reach Anthropic.` + reachHint(url));
+  } finally {
+    cleanup();
   }
   if (!res.ok) {
     const body = await res.text().catch(() => '');
@@ -234,7 +269,7 @@ async function callAnthropic({ baseUrl, apiKey, model, system, user }) {
  * Ask the configured model to rewrite the code.
  * @returns {Promise<{ code: string }>} the rewritten code (fences stripped).
  */
-export async function askEdit({ instruction, code, selection, kit, env, endpoint }) {
+export async function askEdit({ instruction, code, selection, kit, env, endpoint, signal, timeoutMs }) {
   if (!isConfigured(endpoint)) throw new Error('No AI endpoint configured.');
   const system = buildSystemPrompt({ env, kit });
   const user = buildUserPrompt({ instruction, code, selection });
@@ -244,6 +279,8 @@ export async function askEdit({ instruction, code, selection, kit, env, endpoint
     model: endpoint.model,
     system,
     user,
+    signal,
+    timeoutMs,
   };
   const raw = endpoint.provider === 'anthropic'
     ? await callAnthropic(args)
