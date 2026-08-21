@@ -30,6 +30,7 @@
  */
 
 import { libcsound } from '@csound/browser';
+import { SURPRISE_PALETTE } from './csoundPalette.js';
 
 /**
  * Csound's argument-type letters. Given here so a prompt can read a signature
@@ -184,6 +185,57 @@ export function formatOpcode(entry) {
     .slice(0, 4)
     .join(' | ');
   return `${entry.name}: ${sigs}`;
+}
+
+/**
+ * An interesting opcode this piece isn't using yet.
+ *
+ * Quality-diversity pointed at the opcode space instead of the genome space: the
+ * platform's own thesis is that you find good things by exploring breadth rather
+ * than optimising one line, and Csound's breadth is decades deep and nearly
+ * impossible to browse.
+ *
+ * Three filters, in order of importance:
+ *  - it must EXIST in this build (the wish list in csoundPalette.js is ambitious
+ *    on purpose; anything missing simply never comes up),
+ *  - it must not already be in the buffer, because the point is somewhere new,
+ *  - and it must not be in `avoid`, so repeated presses keep moving.
+ *
+ * @returns {Promise<{name, blurb}|null>} null when the palette is exhausted.
+ */
+export async function pickSurprise(code = '', avoid = []) {
+  const { byName } = await getOpcodeIndex();
+  const src = String(code || '');
+  const skip = new Set(avoid);
+  const pool = SURPRISE_PALETTE.filter((c) => byName.has(c.name)
+    && !skip.has(c.name)
+    && !new RegExp(`\\b${c.name}\\b`).test(src));
+  if (!pool.length) return null;
+  const chosen = pool[Math.floor(Math.random() * pool.length)];
+  // The signature travels with the pick. A prose blurb tells a model WHAT an
+  // opcode does but not how many arguments it takes, and the interesting ones take
+  // eight or ten — so a small model guesses, and guessing produces exactly the
+  // "unexpected NUMBER_TOKEN" class of error. This is free: it comes from the same
+  // index that chose the name. The legend rides along so the caller doesn't need
+  // its own import of this module.
+  return {
+    ...chosen,
+    signature: formatOpcode(byName.get(chosen.name)),
+    legend: SIGNATURE_LEGEND,
+  };
+}
+
+/** One line explaining the type letters in a signature, for prompts. */
+export const SIGNATURE_LEGEND =
+  'Signatures read as `outputs <- inputs`, one letter per argument in order: '
+  + 'a = audio rate, k = control rate, i = set once at note start, S = string, '
+  + 'x = audio or control rate, f = spectral stream. '
+  + 'Later letters mark optional arguments, so supply at least the leading ones.';
+
+/** Palette entries this build doesn't have — so the wish list can be pruned. */
+export async function missingFromPalette() {
+  const { byName } = await getOpcodeIndex();
+  return SURPRISE_PALETTE.filter((c) => !byName.has(c.name)).map((c) => c.name);
 }
 
 /** Names matching a substring — the filter behind the spike's search box. */

@@ -191,7 +191,8 @@ Agreed shape:
    (`getCode`, `setCode`, `play`, `stop`, `validate`, `getSelection`, `replaceSelection`).
    Reuse CodeMirror directly; there is no Csound equivalent of `<strudel-editor>`.
 4. Environment object: `hints`, `makeStarter`, `makeRandom`, `docsUrl`
-   (<https://csound.com/docs/manual/>), `bounceUnits: 'seconds'`.
+   (<https://csound.com/manual/> — the SEVEN manual; `/docs/manual/` is Csound 6),
+   `bounceUnits: 'seconds'`.
 5. Tabs UI, switching `environmentId`.
 6. `CSOUND_CONCEPTS` in `concepts.js`, starting with "Playing your kit".
 7. `renderOffline` via non-realtime rendering to the memory FS.
@@ -413,6 +414,13 @@ path that could silently differ at runtime would break all of them at once. Miss
 **`sampleToken` is the quoted path**, `"/kit/name.wav"` — what drops straight into
 `diskin2`. (App's `copyToken` still hard-codes Strudel's `s("name")`; step 5.)
 
+**`docsUrl` is <https://csound.com/manual/>, not `/docs/manual/`.** The latter is the
+Csound 6 manual and was the original brief's link. Sending someone who is learning
+from this app to documentation for a different version of the language undoes the
+very thing §4 rule 2 is for. Two pages there worth mining later: *Deprecated
+Opcodes*, which is where `outs` and its relatives are listed and would harden the AI
+preamble, and *Opcodes Quick Reference*.
+
 ### On looping, and not making Csound into Strudel
 
 A Strudel pattern repeats until stopped; a Csound score is a timeline that ends.
@@ -605,9 +613,6 @@ pad and plays it. The ear pass is not optional.
 
 Claims most worth hearing, because they are asserted rather than verified:
 
-- `ftgen` + GEN01 is a HEADER-level statement, so it may run at `start()` rather
-  than at `compileOrc` — a green tick may not prove the file loaded at all. That
-  affects the three table concepts (`loscil`, `flooper2`, `mincer`).
 - `mincer` decoupling time from pitch — the single most valuable claim in the
   library if true, since it turns a four-second evolved timbre into stretchable
   material.
@@ -615,6 +620,39 @@ Claims most worth hearing, because they are asserted rather than verified:
   into a chord.
 - `i 100 0 -1` held alongside the engine's injected `f 0 86400`.
 - `loscil`'s `ibas` of 1: correct arity, but the semantics only show up as pitch.
+
+### The green tick that wasn't: validation never ran the init pass
+
+§13 warned that `ftgen` + GEN01 is a HEADER statement and might run at `start()`
+rather than at `compileOrc()`, so a tick might not prove the file loaded. It didn't,
+and the warning then sat there while five concepts — `ftgen`, `loscil`, `flooper2`,
+`mincer` and both granular ones — passed the harness without ever opening a file.
+
+It surfaced on Play as:
+
+```
+soundin cannot open /kit/sound1.wav: No Error
+INIT ERROR in instr 0 (opcode ftgen.iS) line 5: ftgen error
+… csound longjmp with code: 255
+```
+
+Three distinct failure points, then, not two: **compile**, **score parse**, and
+**init**. `validateOrc` now starts the instance as well, under `-n` so the init pass
+runs without any audio escaping to the speakers, and `compileAndStart` checks the
+same messages after `start()` — that unreadable `longjmp with code: 255` was Csound
+failing to open a file, which it had already said in plain English one line earlier.
+
+`explainInit()` turns a missing kit file into the sentence that actually helps:
+which sound is missing and that it needs adding to the kit.
+
+(The immediate trigger was benign: `/kit/sound1.wav` is the placeholder
+`conceptNames()` substitutes when the kit is empty, so the session simply had no
+sounds loaded. The bug it exposed was not benign.)
+
+General shape, for the third time in this document: **a check that doesn't run the
+thing cannot vouch for the thing.** Compiling proved the syntax, not the score.
+Parsing the score proved the score, not the init. Each time the gap was invisible
+until something downstream fell over.
 
 ### The kit is mostly sustained textures, and examples have to account for it
 
@@ -635,11 +673,37 @@ a texture (it is heard as space rather than as repeats), but anything that relie
 hearing a copy — flanging, comb filtering, granular density — will have the same
 problem.
 
+### Granular and spectral (added after the ear pass)
+
+Six more concepts, taking the library to 40. Two things make this batch different.
+
+First, the sustained-texture problem inverts here. Echo needed a transient source to
+be legible; granular and spectral processing want exactly the opposite — a long
+evolved timbre is ideal material, and `syncgrain` with a read-point speed of 0 turns
+any single instant of one into a drone. This is where the kit's actual character is
+an advantage rather than something to work around.
+
+Second, three of these are genuinely hard to reach any other way, which is what §12
+meant by surprises: `pvscale` transposes without changing duration (the opposite
+trade from playback rate), `pvsblur` averages the spectrum over time until
+transients dissolve, and `pvscross` applies one sound's spectral shape to another
+and sweeps between them. Cross-synthesis of two evolved timbres is something this
+platform can do that very little else can.
+
+Risk is concentrated in argument counts: `syncgrain`'s eight, the GEN20 window
+table, and the `pvscross` amplitude-balance pair.
+
 ### Still to write
 
-Granular proper (`grain3`, `partikkel`), spectral morphing between two kit sounds,
-MIDI. Then: build "surprise me with an opcode I haven't used" — the point at which
-the 2346-name index starts earning its keep in the other direction.
+MIDI — needs Web MIDI permission plus `getMIDIDevList`, so it is infrastructure as
+well as concepts. `partikkel` deliberately skipped: forty-odd arguments is a
+reference page, not a teaching example, and `syncgrain` covers the ground.
+
+Next feature: **"surprise me with an opcode I haven't used"** — sample from a
+curated interesting-subset of the index, ask the model to weave it into the current
+orchestra, validate, repair. Quality-diversity applied to the opcode space rather
+than the genome space, which is the platform's own thesis pointed at a new
+dimension.
 
 ---
 
@@ -713,3 +777,214 @@ Two consequences that needed handling, both easy to get silently wrong:
 - `padReady` gated the `?seq` deep link on BOTH pads being ready, which would never
   happen if Csound was never loaded. It now waits for Csound only if Csound was
   actually pulled in.
+
+---
+
+## 15. Step 7 — the offline bounce
+
+Status: **works.** `lib/csoundOffline.js`, reached through the csound environment's
+`renderOffline`. The Bounce button and the seconds-based dialog were already wired
+at step 5, so supplying this is what switches them on.
+
+Easier than Strudel's, as §3c predicted — Csound writes a file natively rather than
+needing an OfflineAudioContext assembled by hand. Three decisions worth keeping:
+
+**Its own Csound instance.** The live engine is bound to the speakers' AudioContext
+and may be mid-performance; a bounce must not disturb it, and it needs different
+options anyway (`-o <file>` rather than `-odac`, its own sample rate). An
+`OfflineAudioContext` at the bounce rate keeps the render instance away from the
+output device entirely, and it is terminated in a `finally`.
+
+**No keep-alive.** The realtime engine injects `f 0 86400` so a live-coding session
+never ends when the score runs out (§8). Offline that would mean rendering
+twenty-four hours. The range is bounded with an `e <t>` statement instead — which
+also means dynamically scheduled events (the self-rescheduling clock) keep firing
+right up to the cut, exactly as they should.
+
+**16-bit on purpose** (`-W -s`), not for quality but so the format coming back is
+known and the head can be trimmed without guessing. When the range starts at 0 the
+bytes are returned untouched, so the common case is lossless and does no decoding
+at all.
+
+Kit files are written into the render instance from `fetchKitBytes()`, which reuses
+the live engine's byte cache — so a bounce re-downloads nothing.
+
+### One change in App
+
+`runBounce` used to guard on `padRef.current.getPattern()` and refuse without one.
+That is a Strudel requirement, not a universal one: Csound renders the CODE. It now
+hands over `pattern`, `cps` AND `code` and lets each environment check its own
+input — `renderPatternOffline` already throws "press Play once" when the pattern is
+missing, and that message reaches the user through the existing catch.
+
+### What it actually took — three wrong assumptions in a row
+
+Worth recording, because each was plausible and each was wrong in a different way.
+The fix in every case came from Csound's own messages, which is the argument for
+logging them rather than only the thrown error.
+
+**An OfflineAudioContext cannot be handed to `Csound()`.** It seemed the obviously
+correct context for a non-realtime render. But the library calls `resume()` on
+whatever it is given, and an OfflineAudioContext throws "Cannot resume an offline
+audio context that has not started" unless `startRendering()` has been called
+first. The rejection surfaced as an *unhandled promise* rather than failing the
+render, so the symptom was a valid WAV header with no samples. Reasoning about what
+the class is FOR, rather than what the library does with it.
+
+**`perform()` is in `index.d.ts` but undefined at runtime**, and `start()` alone
+renders nothing when output goes to a file — `SECTION 1:` straight to teardown,
+`Elapsed time: real: 0.000s`. The `renderStarted`/`renderEnded` events do fire,
+which made a timeout-based wait pass while nothing had happened. The performance
+has to be driven explicitly: `performKsmps()` or `performBuffer()` until it returns
+non-zero. Lesson: the type definitions describe the intended API, not this beta.
+
+**Csound's own WAV plays as zero-length.** With the render finally working, the
+file held 1,536,000 bytes of correct PCM and still showed as 0 s in a player.
+libsndfile patches size fields and appends metadata chunks on close, and something
+in that layout isn't what players expect. `rewrapWav()` lifts the samples out and
+writes a canonical 44-byte header instead — copying bytes rather than decoding to
+float and back, which would shift every positive sample by one (32768 going down,
+32767 coming back).
+
+### Performance, and an optimisation that made it worse
+
+The first working render reported `real: 3.000s, CPU: 0.000s` for eight seconds of
+audio — about 12,000 `performKsmps` calls. Csound's DSP cost was nil; the whole
+three seconds was JS↔wasm round trips. The obvious lever is fewer, larger calls.
+
+So: `-b 8192` plus `performBuffer()`. It ran **three times slower** — 9,144 ms — and
+the log said why in its first four words: `12064 × performKsmps`. **`performBuffer`
+doesn't exist on this build either**, so the call count never changed and the
+buffer option did nothing but pad the output to a buffer boundary (8.043 s instead
+of 8.000 s). What did change was progress reporting: switching from a local
+division to `getScoreTime()` every 16 calls added ~750 fire-and-forget round trips
+into the very queue being optimised.
+
+A pure loss, and the second time in this file that a method present in
+`index.d.ts` turned out to be absent at runtime. Reverted: no `-b`, local progress,
+and the output clamped to the requested duration.
+
+**There is no lever available.** Raising ksmps would genuinely reduce the call
+count, and is not allowed — it changes the k-rate, so the bounce would no longer
+match what was heard. ~3 s per 8 s of audio is the floor until a bulk-perform entry
+point appears; the feature-detection stays so a future build picks it up for free.
+
+The measurement is the part worth keeping. One line in the loop turned "is this
+faster?" into a fact in a single round trip, and it is what caught this.
+
+### Still to verify
+
+- A non-zero start time (the trim path).
+- 96 kHz, which would prove `--sample-rate` governs the file rather than inheriting
+  the device rate from the shared context.
+- Bouncing while the live engine is playing, now that they share a context.
+- The Ableton hand-off, unchanged but now carrying Csound audio.
+
+---
+
+## 16. Step 8 — the AI layer
+
+Status: **written, not yet exercised against a live endpoint.**
+
+Most of this had already landed as a side effect of earlier steps: `buildReference`
+emits the Csound preamble plus all 40 concepts, `hasConcepts('csound')` switches the
+Ask-AI bar on, the repair prompt says "this version of Csound", and `enrichError`
+feeds real opcode names back after `unable to find opcode with name: X`. What was
+left was the leak §5 warned about — and it was not where §5 expected.
+
+### The leak was in the sample line, not the pattern rule
+
+`buildSystemPrompt` hard-coded Strudel's syntax:
+
+> The kit currently holds these sample names (use them verbatim inside `s("…")`)
+
+Sent on every Csound request. The model would have been instructed to write
+`s("textural")` when Csound needs `"/kit/textural.wav"` — an instruction that cannot
+produce working code, delivered with the authority of a system prompt.
+
+It now builds that line from `env.sampleToken`, which is already the single source of
+truth for the kit chips, the copy button and the "fit a sound in" prompt. For Csound
+it lists the actual filesystem paths, which is precisely what the model needs.
+
+The general lesson: `buildReference` was made environment-aware early and got the
+attention, so the leak survived in the *surrounding* prose — the part that looked
+too generic to be language-specific.
+
+### Output ceiling is per environment
+
+`MAX_TOKENS` was 2048 globally. A Strudel edit is a line; a Csound answer is a whole
+orchestra, and the preamble explicitly asks the model to comment generously (§12).
+2048 would truncate mid-instrument. `env.maxTokens` overrides it — Csound sets 4096,
+Strudel keeps the default.
+
+### To exercise
+
+With a real endpoint on the Csound tab: does the model produce compiling code, do
+its comments teach, and does the repair pass recover when it reaches for a 6.x
+idiom? The last of those is the interesting one — `outs` is the likeliest thing for
+it to emit, and the preamble names it explicitly.
+
+### Raising the token ceiling broke the timeout
+
+First live attempt: the prompt "melody" against a local model reported *the model
+stopped responding (timed out)* while LM Studio was visibly still generating, and
+finished shortly after.
+
+Cause: `DEFAULT_TIMEOUT_MS` was a flat 120 s, tuned when an answer was a Strudel
+one-liner. Doubling Csound's ceiling to 4096 tokens without touching it meant we
+were aborting requests the server was legitimately working on. **A token ceiling
+and a deadline have to move together** — `timeoutFor(maxTokens)` now derives one
+from the other, assuming a pessimistic ~8 tokens/second floor for a model on CPU,
+capped at ten minutes. `max_tokens` is the real bound on runaway generation; this
+timeout is only the backstop for servers that ignore it, so it should be generous.
+
+The message also claimed the model had "stopped responding" and was probably "stuck
+repeating itself", which was false and sent the user looking in the wrong place. It
+now names the actual limit and says the model may still be working.
+
+Second half of the fix: **a long wait with no feedback is indistinguishable from a
+hang**. `startElapsed()` ticks a seconds counter into the AI status line during both
+the first call and the repair pass. Streaming would be better, and `llm.js` says why
+it hasn't been adopted — but a counter costs nothing and removes the ambiguity.
+
+### The preamble taught everything except the grammar
+
+A small local model (gemma-4-e4b) failed the surprise action three times with
+`unexpected NUMBER_TOKEN, expecting NEWLINE or ','`. Two guesses from the error text
+alone were wrong. The rejected-code logging settled it in one look:
+
+```
+aLorenz1, aLorenz2, aLorenz3 = lorenz 0.01, 0.01, 0.01, 28.0, 9.0, 37.0
+```
+
+That `=` is the error. A Csound opcode call takes no equals sign. Counting columns
+confirms it exactly — two spaces, a 28-character output list, ` = `, `lorenz `, and
+`0.01` begins at column 41, which is what Csound reported.
+
+Two lines later the same model made the opposite mistake, omitting `=` from an
+actual assignment (`aSig aLorenz1 * 0.35, ...`). So it did not have the rule at all,
+in either direction.
+
+**And we probably taught it the confusion.** The select-and-transform concepts use
+functional syntax — `moogladder(aSig, 800, 0.3)` — which legitimately does follow an
+`=`. Generalising that to every opcode is a reasonable inference from what the
+reference showed. Meanwhile the preamble covered rates, deprecated opcodes, mono kit
+files and headroom, and never once stated how a statement is formed. The most basic
+rule was the invisible one, because it is invisible to anyone who already knows the
+language.
+
+Fixed in both places it belongs: the preamble now spells out the three forms
+(opcode call, assignment, functional call) and that mixing them is an error, and a
+new concept, **Two ways to write a line**, teaches the same thing to the human —
+with the wrong version shown as a comment, since it is the mistake everyone makes
+first.
+
+Worth generalising: two wrong guesses from an error string, one right answer from
+the artefact. When something fails repeatedly, look at what was produced rather
+than at what was said about it.
+
+Still open: a model that returns a full `.csd` will have its wrappers stripped at
+play/validate time by `splitCsoundCode`, but the editor buffer keeps them. Cosmetic
+only. A `normalizeCode(code)` hook on the environment would tidy it, at the cost of
+moving `splitCsoundCode` into a dependency-free module so `environments.js` can
+reach it without pulling in the wasm.

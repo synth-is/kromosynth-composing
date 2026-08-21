@@ -12,6 +12,8 @@
  *   makeRandom(kit)     -> a random playable pattern ("surprise me")
  *   tip                 -> the one-line orientation shown above the hints
  *   bounceUnits         -> what the Bounce dialog's range is measured in
+ *   maxTokens           -> optional: output ceiling for AI edits in this language
+ *   pickSurprise(opts)  -> optional: an unfamiliar technique to ask the AI to weave in
  *   renderOffline(opts)  -> optional: non-realtime bounce to WAV bytes
  *
  * `bounceUnits` exists because the range is not universal: Strudel thinks in
@@ -250,7 +252,10 @@ i 99 0 0.1
 const csound = {
   id: 'csound',
   label: 'Csound',
-  docsUrl: 'https://csound.com/docs/manual/',
+  // The SEVEN manual. csound.com/docs/manual/ is Csound 6, which would send someone
+  // learning from this app to documentation for a different language version than
+  // the one they are running — the same version-anchoring point as §4 rule 2.
+  docsUrl: 'https://csound.com/manual/',
 
   tip: 'Everything above <CsScore> is the orchestra \u2014 what your sounds are. Below it is the score \u2014 when they happen. A score ends; the starter keeps going because its clock instrument re-books itself.',
 
@@ -278,9 +283,38 @@ const csound = {
   makeStarter: csoundStarter,
   makeRandom: csoundRandom,
 
+  // A Strudel answer is a line; a Csound answer is a whole orchestra, and the
+  // preamble asks the model to comment it generously. 2048 output tokens would
+  // truncate mid-instrument.
+  maxTokens: 4096,
+
+  /**
+   * An opcode this piece isn't using yet, for the “surprise me” action.
+   *
+   * Csound has 2346 opcodes in this build and decades of work behind them; the
+   * palette and the concept library between them reach maybe fifty. This is the
+   * route to the rest — exploration rather than exploitation, which is the same
+   * bet the platform makes about genomes.
+   *
+   * Dynamically imported for the bundling reason above.
+   */
+  pickSurprise: async ({ code, avoid } = {}) => {
+    const { pickSurprise } = await import('./csoundOpcodes.js');
+    return pickSurprise(code, avoid);
+  },
+
   // Csound renders non-realtime natively and its range is naturally in seconds,
-  // not Strudel's cycles. renderOffline lands at step 7; until then the Bounce
-  // button reports that this environment can't bounce.
+  // not Strudel's cycles.
+  //
+  // DYNAMIC import on purpose: lib/csoundOffline.js pulls in @csound/browser, and
+  // this module is loaded by App.jsx on every page view. Statically importing it
+  // would put 2.6 MB of wasm in front of people who only use Strudel — the same
+  // trap that made csoundPaths.js necessary. The chunk arrives on first bounce
+  // (and is usually already there, since using the Csound tab loads it).
+  renderOffline: async (opts) => {
+    const { renderCsoundOffline } = await import('./csoundOffline.js');
+    return renderCsoundOffline(opts);
+  },
   bounceUnits: 'seconds',
 };
 

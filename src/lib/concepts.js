@@ -516,6 +516,33 @@ i 99 0 0.1`),
     match: /\bschedule\b/,
   },
 
+  {
+    id: 'cs-two-forms', category: 'Instrument basics', label: 'Two ways to write a line',
+    explain: 'An opcode call has no equals sign; an equals sign is for arithmetic. Mixing them up is the mistake everyone makes first.',
+    example: () => csBuf(
+`instr 1
+  ; FORM 1 — an opcode call. Outputs on the left, then the opcode name, then its
+  ; arguments separated by commas. There is NO equals sign.
+  aTone poscil 0.2, 220
+
+  ; Some opcodes hand back more than one thing. Still no equals sign.
+  aL, aR pan2 aTone, 0.3
+
+  ; FORM 2 — an assignment. The equals sign is for arithmetic on values you
+  ; already have.
+  aQuiet = aL * 0.5
+
+  ; An opcode with ONE output can also be written like a function, and then it
+  ; does follow an equals sign — because the call is now an expression.
+  aFiltered = moogladder(aQuiet, 900, 0.3)
+
+  ; What never works is mixing them: \`aOut = poscil 0.2, 220\` is a syntax error.
+  out aFiltered, aFiltered
+endin`,
+`i 1 0 2`),
+    match: /=\s*[a-z]\w*\s*\(/i,
+  },
+
   // ---- Playing your kit ----
   {
     id: 'cs-diskin', category: 'Playing your kit', label: 'Play one of your sounds',
@@ -1053,6 +1080,117 @@ i 1 0 4`),
     match: /\bchn(get|set)\b/,
   },
 
+  // ---- Granular ----
+  {
+    id: 'cs-syncgrain', category: 'Granular', label: 'Granular clouds',
+    explain: 'Chop the sound into hundreds of tiny grains and rebuild it. Density alone takes you from stutter to smooth texture.',
+    example: (n) => csBuf(
+`giSnd ftgen 0, 0, 0, 1, "${kitFilePath(n.a)}", 0, 0, 0
+; GEN20 makes a window shape — the little fade applied to each grain so the
+; edges don't click. 2 is a Hanning curve.
+giWin ftgen 0, 0, 16384, 20, 2, 1
+
+instr 1
+  ; syncgrain: amplitude, grains per second, pitch, grain size in seconds,
+  ; how fast the read point moves through the source, source table,
+  ; window table, and how many grains may overlap.
+  ; p4 is the density. Below ~20 you hear separate grains; above ~100 they
+  ; fuse into a continuous texture.
+  aSig syncgrain 0.4, p4, 1, 0.08, 0.25, giSnd, giWin, 20
+  aEnv linen 1, 0.1, p3, 0.5
+  out aSig * aEnv, aSig * aEnv
+endin`,
+`i 1 0.0 2 8
+i 1 2.0 2 40
+i 1 4.0 3 200`),
+    match: /\bsyncgrain\b/,
+  },
+  {
+    id: 'cs-freeze-grain', category: 'Granular', label: 'Freeze on one moment',
+    explain: 'Stop the read point and the grains keep coming from a single instant — a drone made of one slice of your sound.',
+    example: (n) => csBuf(
+`giSnd ftgen 0, 0, 0, 1, "${kitFilePath(n.a)}", 0, 0, 0
+giWin ftgen 0, 0, 16384, 20, 2, 1
+
+instr 1
+  ; The fifth argument is the read-point speed. 0 means it never moves:
+  ; every grain comes from the same place in the file, forever.
+  ; p4 is the grain size — small grains buzz, long ones sound like a pad.
+  ; p5 transposes without changing anything else.
+  aSig syncgrain 0.35, 80, p5, p4, 0, giSnd, giWin, 30
+  aEnv linen 1, 0.5, p3, 1
+  out aSig * aEnv, aSig * aEnv
+endin`,
+`;          grain  pitch
+i 1 0.0 4  0.02   1
+i 1 4.0 4  0.20   1
+i 1 8.0 4  0.20   1.5`),
+  },
+
+  // ---- Spectral ----
+  {
+    id: 'cs-pvscale', category: 'Spectral', label: 'Pitch-shift without time-shift',
+    explain: 'Move the frequencies and leave the timing alone — the opposite trade from playback rate.',
+    example: (n) => csBuf(
+`instr 1
+  aSig diskin2 "${kitFilePath(n.a)}", 1
+  fSig pvsanal aSig, 1024, 256, 1024, 1
+  ; pvscale multiplies every frequency by p4. 2 is an octave up, and
+  ; unlike changing the playback rate the sound still takes just as long.
+  fUp pvscale fSig, p4
+  aOut pvsynth fUp
+  aEnv linen 0.5, 0.02, p3, 0.1
+  out aOut * aEnv, aOut * aEnv
+endin`,
+`; Three transpositions, all the same length.
+i 1 0.0 2 1
+i 1 2.0 2 1.5
+i 1 4.0 2 0.5`),
+    match: /\bpvscale\b/,
+  },
+  {
+    id: 'cs-pvsblur', category: 'Spectral', label: 'Smear it in time',
+    explain: 'Average each frequency over a window of time. Transients dissolve and the sound turns to fog.',
+    example: (n) => csBuf(
+`instr 1
+  aSig diskin2 "${kitFilePath(n.a)}", 1
+  fSig pvsanal aSig, 1024, 256, 1024, 1
+  ; pvsblur: the stream, how many seconds to average over, and the most
+  ; it will ever need to store. Longer blur = less detail, more cloud.
+  fBlur pvsblur fSig, p4, 2
+  aOut pvsynth fBlur
+  aEnv linen 0.6, 0.05, p3, 0.2
+  out aOut * aEnv, aOut * aEnv
+endin`,
+`i 1 0.0 2 0.05
+i 1 2.0 2 0.4
+i 1 4.0 3 1.5`),
+    match: /\bpvsblur\b/,
+  },
+  {
+    id: 'cs-pvscross', category: 'Spectral', label: 'Morph one sound into another',
+    explain: 'Cross-synthesis: give one sound the spectral shape of another, and fade between them.',
+    example: (n) => csBuf(
+`instr 1
+  ; Two of your sounds, analysed into spectral streams.
+  aA diskin2 "${kitFilePath(n.a)}", 1
+  aB diskin2 "${kitFilePath(n.b)}", 1
+  fA pvsanal aA, 1024, 256, 1024, 1
+  fB pvsanal aB, 1024, 256, 1024, 1
+  ; kMix walks from one to the other across the note. pvscross takes the
+  ; two amplitude balances — so at the start you hear mostly A's shape,
+  ; at the end mostly B's, and in the middle something that is neither.
+  ; The middle is the interesting part. Try holding it at 0.5.
+  kMix line 0, p3, 1
+  fX pvscross fA, fB, 1 - kMix, kMix
+  aOut pvsynth fX
+  aEnv linen 0.6, 0.05, p3, 0.3
+  out aOut * aEnv, aOut * aEnv
+endin`,
+`i 1 0 6`),
+    match: /\bpvscross\b/,
+  },
+
   // ---- Select-and-transform (no standalone example; they wrap a selection) ----
   {
     id: 'cs-lowpass', category: 'Shaping a signal', label: 'Low-pass filter', quick: true,
@@ -1143,6 +1281,9 @@ const CSOUND_PREAMBLE = `Csound 7 (WebAssembly build). Essentials:
 - Do NOT write an \`sr\` line — the app sets the sample rate to match the browser. Start with: ksmps = 32 / nchnls = 2 / 0dbfs = 1.
 - Output with \`out aL, aR\`. \`outs\` is DEPRECATED in Csound 7 — never emit it.
 - A variable's first letter is its rate: a... = audio rate (the sound itself), k... = control rate (movement), i... = set once at note start, S... = string.
+- TWO STATEMENT FORMS, and confusing them is the most common Csound error. (1) An OPCODE CALL has NO equals sign: \`aOut opcodename arg1, arg2\` — outputs on the left, then the opcode name, then comma-separated arguments. Several outputs are fine: \`aL, aR pan2 aSig, 0.3\`. (2) An ASSIGNMENT uses \`=\` for arithmetic on values you already have: \`aMix = aOne * 0.5 + aTwo\`. A single-output opcode may also be written as a function, and only THEN does it follow an \`=\`: \`aOut = moogladder(aSig, 900, 0.3)\`. NEVER mix the two — \`aOut = poscil 0.2, 220\` and \`aLeft, aRight = lorenz 0.01, 0.01\` are both syntax errors.
+- One statement per line; there is no line-continuation character.
+- Supply the arguments an opcode actually takes, in order. Do not invent extra ones, and do not omit required ones to make a line look tidier.
 - p-fields come from the score line: p1 = instrument, p2 = start, p3 = duration, p4 onward are yours.
 - \`schedule instr, whenFromNow, duration, p4...\` fires an event from code. Its start time is relative to NOW, so an instrument that schedules ITSELF one bar ahead is how you loop. A score on its own ends.
 - Kit sounds are files in Csound's virtual filesystem, played with \`diskin2 "<path>", rate\`. They are MONO, so diskin2 takes ONE output. The available paths are listed under the prompt.

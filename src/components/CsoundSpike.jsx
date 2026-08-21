@@ -108,6 +108,7 @@ export default function CsoundSpike() {
   const [missQuery, setMissQuery] = useState('arpeggiate');
   const [missHits, setMissHits] = useState([]);
   const [conceptResults, setConceptResults] = useState(null); // [{ id, label, ok, error }]
+  const [palette, setPalette] = useState(null); // { missing: string[], picks: [] }
   const padRef = useRef(null);
   const status = cs.getStatus();
   const info = cs.getKitInfo();
@@ -264,6 +265,20 @@ export default function CsoundSpike() {
     padRef.current?.setCode(r.buffer);
     padRef.current?.play();
   };
+
+  /** Which of the hand-written surprise palette this build actually has. */
+  const checkPalette = () => run('Checking the palette…', async () => {
+    const missing = await opcodes.missingFromPalette();
+    const picks = [];
+    const seen = [];
+    for (let i = 0; i < 6; i++) {
+      const p = await opcodes.pickSurprise('', seen);
+      if (!p) break;
+      seen.push(p.name);
+      picks.push(p);
+    }
+    setPalette({ missing, picks });
+  });
 
   const log = cs.getLog();
 
@@ -441,6 +456,28 @@ export default function CsoundSpike() {
           A tick means Csound COMPILED it, not that it sounds like its comments claim.
           Use ▶ to hear each one — that is the half a compiler can’t check.
         </div>
+      </div>
+
+      <div style={{ marginTop: 22 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+          <strong style={{ fontSize: 14 }}>6 · Surprise palette</strong>
+          <span className="muted small">the wish list, intersected with this build</span>
+          <span className="spacer" />
+          <button className="btn tiny" onClick={checkPalette} disabled={!!busy}>Check palette</button>
+        </div>
+        {palette && (
+          <div style={{ fontSize: 12, lineHeight: 1.6 }}>
+            <div className="muted small" style={{ marginBottom: 6 }}>
+              {palette.missing.length === 0
+                ? 'Every entry exists in this build.'
+                : `Not in this build (${palette.missing.length}) — prune these from csoundPalette.js: ${palette.missing.join(', ')}`}
+            </div>
+            <div className="muted small">Sample draws:</div>
+            {palette.picks.map((p) => (
+              <div key={p.name}><code>{p.name}</code> <span className="muted">— {p.blurb}</span></div>
+            ))}
+          </div>
+        )}
       </div>
 
       <pre style={{

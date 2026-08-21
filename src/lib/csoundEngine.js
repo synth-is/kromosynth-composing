@@ -43,7 +43,7 @@ export { KIT_DIR, kitFilePath };
 // Bump on every edit to this file. It prints to the browser console at module
 // evaluation AND into the in-app log, so "am I looking at stale code?" is a
 // glance rather than a debugging session — which it cost us once already.
-const ENGINE_REVISION = '2026-08-21e (shared kit paths)';
+const ENGINE_REVISION = '2026-08-21f (init-pass validation)';
 console.log('[csoundEngine] rev', ENGINE_REVISION);
 
 const LOG_LIMIT = 500;
@@ -98,7 +98,26 @@ function collectErrors(fromIndex) {
       || /\bsyntax error\b/i.test(t)
       || /unable to find opcode/i.test(t)
       || /parsing failed|stopping on parser failure/i.test(t)
+      // Init-pass failures. Header statements (ftgen and friends) run at start(),
+      // not at compile, so these never appear until the instance is started — see
+      // the note in validateOrc.
+      || /^init error/i.test(t)
+      || /cannot open|failed to open file|ftgen error/i.test(t)
       || /\berror:/i.test(t));
+}
+
+/** Turn an init failure into something the person can act on. */
+function explainInit(errs) {
+  if (!errs.length) return null;
+  const missing = errs.find((t) => /cannot open|failed to open file/i.test(t));
+  if (missing) {
+    const m = /\/kit\/([A-Za-z0-9_]+)\.wav/.exec(missing);
+    if (m) {
+      return `Couldn't open "${m[1]}" — there's no such sound in your kit. `
+        + 'Add it from the sound browser, or use one of the names shown in the kit bar.';
+    }
+  }
+  return errs[0];
 }
 
 export function getStatus() {
@@ -250,6 +269,28 @@ export async function syncKit(kitMap = {}) {
 }
 
 /**
+ * Kit bytes for `kitMap`, fetching only what isn't already cached.
+ *
+ * Exists so the offline bounce can write the kit into ITS OWN Csound instance
+ * without re-downloading anything the live engine already holds. Returns
+ * name -> Uint8Array.
+ */
+export async function fetchKitBytes(kitMap = {}) {
+  const out = new Map();
+  for (const [name, url] of Object.entries(kitMap)) {
+    if (!url) continue;
+    const cached = kitBytes.get(name);
+    if (cached && cached.url === url) { out.set(name, cached.bytes); continue; }
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Could not fetch kit sound "${name}": HTTP ${res.status}`);
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    kitBytes.set(name, { url, bytes });
+    out.set(name, bytes);
+  }
+  return out;
+}
+
+/**
  * What we know about each kit file that's in the FS.
  *
  * Worth having beyond diagnostics: renderClient produces MONO WAVs, and `diskin2`
@@ -301,9 +342,12 @@ function stripCsdWrappers(orc) {
     .trim();
 }
 
-async function applyOptions(cs) {
+async function applyOptions(cs, { silent = false } = {}) {
   const c = getContext();
-  await cs.setOption('-odac');
+  // `-n` runs everything EXCEPT writing audio anywhere. Validation needs the init
+  // pass to happen (that is where ftgen opens soundfiles) without a blip escaping
+  // to the speakers.
+  await cs.setOption(silent ? '-n' : '-odac');
   await cs.setOption('-d'); // no display windows
   // Match the browser's device rate rather than letting the orchestra declare one:
   // a mismatched `sr` is a silently detuned, wrong-speed render. Starter code
@@ -357,7 +401,23 @@ export async function compileAndStart({ orc, sco = '', kitMap = null } = {}) {
   const scoErrs = collectErrors(scoFrom);
   if (scoErrs.length) throw new Error(`Score: ${scoErrs[0]}`);
 
-  await cs.start();
+  // start() runs the INIT pass, which is where header statements like
+  // `ftgen ... GEN01` actually open their files. Failures there don't throw — they
+  // arrive as messages, and the raw exception when they do throw is an unreadable
+  // "csound longjmp with code: 255". Either way, report what Csound said.
+  const initFrom = logLines.length;
+  let startThrew = null;
+  try {
+    await cs.start();
+  } catch (e) {
+    startThrew = e?.message || String(e);
+  }
+  await settle();
+  const initErrs = collectErrors(initFrom);
+  if (startThrew || initErrs.length) {
+    try { await cs.stop(); } catch { /* ignore */ }
+    throw new Error(explainInit(initErrs) || `Csound couldn't start: ${startThrew}`);
+  }
   started = true;
 
   // The sample-rate question the spike exists to answer: did --sample-rate win?
@@ -401,7 +461,7 @@ export async function validateOrc(orc, { sco = '', kitMap = null } = {}) {
   await cs.reset();
   writtenKit.clear();
   kitDirChecked = false;
-  await applyOptions(cs);
+  await applyOptions(cs, { silent: true });
   // Cheap now that bytes are cached, and it keeps header-time file references
   // (ftgen/GEN01) from failing for the wrong reason.
   if (kitMap && Object.keys(kitMap).length) {
@@ -417,6 +477,16 @@ export async function validateOrc(orc, { sco = '', kitMap = null } = {}) {
   if (!threw && sco && sco.trim()) {
     try { await cs.readScore(`f 0 86400\n${sco.trim()}`); } catch (e) { threw = e?.message || String(e); }
   }
+  // And the INIT pass, which is a third distinct place things fail. Header
+  // statements — `giSnd ftgen 0, 0, 0, 1, "/kit/x.wav", 0, 0, 0` above all — do not
+  // run at compile time. They run when the instance starts. Validating without
+  // starting therefore gave every table-based concept a clean tick while the file
+  // was never opened at all, and the failure only appeared on Play as an
+  // unreadable "csound longjmp with code: 255". `-n` above keeps this silent.
+  if (!threw) {
+    try { await cs.start(); } catch (e) { threw = e?.message || String(e); }
+    try { await cs.stop(); } catch { /* ignore */ }
+  }
   await settle();
   const errs = collectErrors(from);
   const badStatus = typeof status === 'number' && status !== 0;
@@ -424,7 +494,7 @@ export async function validateOrc(orc, { sco = '', kitMap = null } = {}) {
   emit();
   return {
     ok,
-    error: ok ? null : (threw || errs[0] || `compileOrc returned ${status}`),
+    error: ok ? null : (explainInit(errs) || threw || `compileOrc returned ${status}`),
   };
 }
 

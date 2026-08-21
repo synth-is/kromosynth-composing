@@ -81,6 +81,9 @@ export default function App() {
   const replayAfterRenderRef = useRef(false);
   // Lets an AI (or other labelled) edit stamp the next trajectory snapshot; consumed by handleEval.
   const pendingLabelRef = useRef(null);
+  // Opcodes the surprise action has already offered this session, so pressing it
+  // repeatedly keeps moving instead of circling the same few.
+  const surprisedWithRef = useRef([]);
 
   const [user, setUser] = useState(null);
   // Active live-coding environment. ONE per composition; tabs will switch this when
@@ -194,10 +197,12 @@ export default function App() {
     });
   }, [environmentId]);
 
-  const flash = useCallback((msg) => {
+  // `ms` because a failure you can't finish reading is barely better than none:
+  // errors get longer than the 3s a confirmation needs.
+  const flash = useCallback((msg, ms = 3000) => {
     setStatus(msg);
     window.clearTimeout(flash._t);
-    flash._t = window.setTimeout(() => setStatus(''), 3000);
+    flash._t = window.setTimeout(() => setStatus(''), ms);
   }, []);
 
   // On load: adopt an SSO token handed off from the main app (#token=…), else
@@ -587,9 +592,6 @@ export default function App() {
    */
   const runBounce = async ({ from, to, sampleRate, target }) => {
     if (!env.renderOffline) { flash(`${env.label} can’t bounce offline yet`); return; }
-    const pattern = padRef.current?.getPattern?.();
-    const cps = padRef.current?.getCps?.();
-    if (!pattern) { flash('Press Play once so there’s a pattern to bounce'); return; }
     setBouncing(true);
     setBounceProgress(0);
     try {
@@ -599,9 +601,14 @@ export default function App() {
       const range = env.bounceUnits === 'seconds'
         ? { fromSeconds: from, toSeconds: to }
         : { fromCycle: from, toCycle: to };
+      // Environments want different things: Strudel renders an evaluated PATTERN
+      // (so it needs a Play first, and its renderOffline says so if there isn't
+      // one), Csound renders the CODE. Hand over both and let each check its own
+      // input — a guard here could only be wrong for one of them.
       const { wav, durationSecs, skipped, total } = await env.renderOffline({
-        pattern,
-        cps,
+        pattern: padRef.current?.getPattern?.() ?? null,
+        cps: padRef.current?.getCps?.() ?? null,
+        code: padRef.current?.getCode?.() ?? '',
         ...range,
         sampleRate,
         kitMap: getKitMap(),
@@ -633,7 +640,10 @@ export default function App() {
         flash(`Bounced ${secs}s — downloaded${warn}`);
       }
     } catch (e) {
-      flash(`Bounce failed: ${(e.message || '').slice(0, 140)}`);
+      // Full text to the console — the toast is clipped, and a bounce failure is
+      // usually a Csound message worth reading in full.
+      console.error('[bounce] failed:', e);
+      flash(`Bounce failed: ${(e.message || '').slice(0, 200)}`, 12000);
     } finally {
       setBouncing(false);
       setBounceProgress(0);
@@ -709,23 +719,71 @@ export default function App() {
     return t.length > 110 ? t.slice(0, 110) + '…' : t;
   };
 
-  // Ask the model, then validate the result against Strudel; on failure, one
-  // repair pass (re-prompt with the error). Returns runnable code, or null (with
-  // aiStatus set to explain). Steps are surfaced via aiStatus so they're visible.
+  /**
+   * The source line an error points at, for the repair prompt.
+   *
+   * Csound reports `… line 17, columns 22,25`, and a model given only that has to
+   * re-derive which line it wrote. Showing it the line closes the loop, and it
+   * costs nothing — we already have both halves. No-op for languages whose errors
+   * carry no line number, so Strudel is unaffected.
+   */
+  const quoteFailingLine = (code, error) => {
+    const m = /\bline (\d+)/i.exec(error || '');
+    if (!m) return '';
+    const line = String(code || '').split('\n')[Number(m[1]) - 1];
+    return line ? `\n\nLine ${m[1]}, which you wrote, reads:\n${line}\n` : '';
+  };
+
+  /**
+   * Show a ticking elapsed count while the model works.
+   *
+   * A Csound answer is a whole commented orchestra, which on a local model can take
+   * minutes. Without this the UI is indistinguishable from a hang — which is exactly
+   * how it read the first time a long generation ran past the old flat timeout.
+   * Returns a function that stops the ticker.
+   */
+  const startElapsed = (label) => {
+    const t0 = Date.now();
+    setAiStatus({ kind: 'info', text: label });
+    const id = window.setInterval(() => {
+      setAiStatus({ kind: 'info', text: `${label} (${Math.round((Date.now() - t0) / 1000)}s)` });
+    }, 1000);
+    return () => window.clearInterval(id);
+  };
+
+  // Ask the model, then validate the result against the active language; on
+  // failure, one repair pass (re-prompt with the error). Returns runnable code, or
+  // null (with aiStatus set to explain). Steps are surfaced via aiStatus so they're
+  // visible.
   const generateValidated = async (instruction, code, selection) => {
-    setAiStatus({ kind: 'info', text: 'Asking the model…' });
-    let out = ((await llm.askEdit({ instruction, code, selection, kit, env, endpoint: aiEndpoint })).code || '').trim();
+    let stopTick = startElapsed('Asking the model…');
+    let out;
+    try {
+      out = ((await llm.askEdit({ instruction, code, selection, kit, env, endpoint: aiEndpoint })).code || '').trim();
+    } finally { stopTick(); }
     if (!out) { setAiStatus({ kind: 'error', text: 'The model returned no code.' }); return null; }
     setAiStatus({ kind: 'info', text: 'Checking it runs…' });
     let check = await padRef.current?.validate?.(out);
     if (check && !check.ok) {
-      setAiStatus({ kind: 'info', text: `Didn't run (${briefErr(check.error)}) — asking for a fix…` });
-      const repair = `${instruction}\n\nYour previous attempt did not run. Error:\n${check.error}\nReturn corrected code that runs in this version of ${env.label}, using only functions that exist. Output only code.`;
-      const fixed = ((await llm.askEdit({ instruction: repair, code, selection, kit, env, endpoint: aiEndpoint })).code || '').trim();
-      if (fixed) { out = fixed; check = await padRef.current?.validate?.(out); }
+      stopTick = startElapsed(`Didn't run (${briefErr(check.error)}) — asking for a fix…`);
+      const repair = `${instruction}\n\nYour previous attempt did not run. Error:\n${check.error}`
+        + quoteFailingLine(out, check.error)
+        + `\nReturn corrected code that runs in this version of ${env.label}, using only functions that exist, with the right number of arguments in the right order. Output only code.`;
+      let fixed = '';
+      try {
+        fixed = ((await llm.askEdit({ instruction: repair, code, selection, kit, env, endpoint: aiEndpoint })).code || '').trim();
+      } finally { stopTick(); }
+      if (fixed) {
+        setAiStatus({ kind: 'info', text: 'Checking the fix…' });
+        out = fixed;
+        check = await padRef.current?.validate?.(out);
+      }
     }
     if (check && !check.ok) {
-      setAiStatus({ kind: 'error', text: `Still didn't run: ${briefErr(check.error)} — not applied. Try rephrasing.` });
+      // Rejected code is still worth seeing: it is often nearly right, and without
+      // this the only evidence of a failed attempt is one clipped error message.
+      console.warn('[ai] rejected after repair:', check.error, '\n\n' + out);
+      setAiStatus({ kind: 'error', text: `Still didn't run: ${briefErr(check.error)} — not applied (the attempt is in the console).` });
       return null;
     }
     return out;
@@ -751,6 +809,53 @@ export default function App() {
     } catch (e) {
       pendingLabelRef.current = null;
       setAiStatus({ kind: 'error', text: `AI failed: ${briefErr(e.message)}` });
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
+  /**
+   * Surprise me with a technique I haven't used.
+   *
+   * The palette and the Concepts library between them cover a few dozen of this
+   * build's 2346 opcodes. This is the door to the rest: pick one that isn't in the
+   * buffer, hand the model a one-line description of what it does, and let the
+   * validate→repair loop deal with the signature. Exploration rather than
+   * exploitation — the same bet the platform makes about genomes.
+   */
+  const surpriseWithTechnique = async () => {
+    if (!env.pickSurprise) return;
+    if (!aiAvailable) { setAiStatus({ kind: 'error', text: aiUnavailableReason }); return; }
+    if (!llm.isConfigured(aiEndpoint)) { setShowAiSettings(true); return; }
+    setAiBusy(true);
+    try {
+      const code = padRef.current?.getCode?.() ?? '';
+      setAiStatus({ kind: 'info', text: 'Looking for something you haven’t used…' });
+      const pick = await env.pickSurprise({ code, avoid: surprisedWithRef.current });
+      if (!pick) {
+        setAiStatus({ kind: 'info', text: 'You’ve been offered everything in the palette this session.' });
+        return;
+      }
+      surprisedWithRef.current = [...surprisedWithRef.current, pick.name];
+      setAiStatus({ kind: 'info', text: `Weaving in ${pick.name} — ${pick.blurb}…` });
+      // The signature matters as much as the description: these opcodes take eight
+      // or ten arguments, and without it a small model guesses the arity.
+      const sig = pick.signature
+        ? `\n\nIts signature in this build is:\n${pick.signature}\n${pick.legend || ''}`
+        : '';
+      const instruction = `Bring the opcode ${pick.name} into this piece — it ${pick.blurb}.${sig}\n\n`
+        + `Build on what is already here rather than starting over, and keep the existing material recognisable. `
+        + `Comment the lines you add so I can see what ${pick.name} is doing and which numbers to change.`;
+      const out = await generateValidated(instruction, code, null);
+      if (!out) return; // aiStatus already explains
+      pendingLabelRef.current = `AI · surprise: ${pick.name}`;
+      padRef.current?.setCode(out);
+      setSelection(null);
+      padRef.current?.play();
+      setAiStatus({ kind: 'info', text: `${pick.name} — ${pick.blurb}` });
+    } catch (e) {
+      pendingLabelRef.current = null;
+      setAiStatus({ kind: 'error', text: `Surprise failed: ${briefErr(e.message)}` });
     } finally {
       setAiBusy(false);
     }
@@ -1081,6 +1186,7 @@ export default function App() {
             hasSelection={!!selection}
             disabledReason={aiAvailable ? null : aiUnavailableReason}
             onAsk={askAi}
+            onSurprise={env.pickSurprise ? surpriseWithTechnique : null}
             onOpenSettings={() => setShowAiSettings(true)}
           />
           {aiStatus && (
@@ -1587,7 +1693,7 @@ function BounceDialog({ env, cps, ableton, onClose, onBounce }) {
   );
 }
 
-function AskAiBar({ configured, busy, hasSelection, disabledReason, onAsk, onOpenSettings }) {
+function AskAiBar({ configured, busy, hasSelection, disabledReason, onAsk, onSurprise, onOpenSettings }) {
   const [text, setText] = useState('');
   const submit = () => { const t = text.trim(); if (t) onAsk(t); };
   const off = !!disabledReason;
@@ -1608,6 +1714,14 @@ function AskAiBar({ configured, busy, hasSelection, disabledReason, onAsk, onOpe
           disabled={busy || off}
         />
         <button className="btn tiny" onClick={submit} disabled={busy || off || !text.trim()}>{busy ? 'Asking…' : 'Ask AI'}</button>
+        {onSurprise && (
+          <button
+            className="btn tiny ghost"
+            onClick={onSurprise}
+            disabled={busy || off}
+            title="Bring in a technique you haven't used yet"
+          >✦ Surprise</button>
+        )}
         <button className="btn tiny ghost" title="AI endpoint settings" onClick={onOpenSettings} disabled={off}>⚙</button>
       </div>
       <div className="muted small" style={{ marginTop: 4 }}>
