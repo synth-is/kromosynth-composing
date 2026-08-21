@@ -66,6 +66,10 @@ export default function App() {
   const pendingLabelRef = useRef(null);
 
   const [user, setUser] = useState(null);
+  // Active live-coding environment. ONE per composition; tabs will switch this when
+  // Csound/WebChucK land. Each environment keeps its own trajectory (below), so
+  // scrubbing never drops one language's code into another's editor.
+  const [environmentId, setEnvironmentId] = useState('strudel');
   const [source, setSource] = useState('public'); // 'public' | 'garden'
   const [sounds, setSounds] = useState([]);
   const [loadingSounds, setLoadingSounds] = useState(false);
@@ -82,7 +86,7 @@ export default function App() {
   const [auditionId, setAuditionId] = useState(null);
   const [status, setStatus] = useState('');
 
-  const [trajectory, setTrajectory] = useState([]);
+  const [trajectories, setTrajectories] = useState({}); // { [envId]: snapshot[] } — one timeline per environment
   const [scrubIndex, setScrubIndex] = useState(null);
 
   const [showLogin, setShowLogin] = useState(false);
@@ -104,6 +108,18 @@ export default function App() {
   const [showAiSettings, setShowAiSettings] = useState(false);
   const [aiBusy, setAiBusy] = useState(false);
   const [aiStatus, setAiStatus] = useState(null); // { kind:'info'|'error', text } | null
+
+  const env = getEnvironment(environmentId);
+  // Timeline of the active environment. setTrajectory keeps the existing call
+  // signature (value or updater) so nothing downstream had to change.
+  const trajectory = trajectories[environmentId] || [];
+  const setTrajectory = useCallback((updater) => {
+    setTrajectories((prev) => {
+      const current = prev[environmentId] || [];
+      const next = typeof updater === 'function' ? updater(current) : updater;
+      return { ...prev, [environmentId]: next };
+    });
+  }, [environmentId]);
 
   const flash = useCallback((msg) => {
     setStatus(msg);
@@ -293,7 +309,7 @@ export default function App() {
     pendingLabelRef.current = null;
     setTrajectory((prev) => appendSnapshot(prev, makeSnapshot(code, kit, label)));
     setScrubIndex(null);
-  }, [kit]);
+  }, [kit, setTrajectory]);
 
   const scrubTo = (idx) => {
     const snap = trajectory[idx];
@@ -321,7 +337,13 @@ export default function App() {
   // Don't persist ephemeral blob URLs or transient flags.
   const buildState = () => {
     const cleanKit = kit.map(({ url, rendering, ...rest }) => rest);
-    return { environment: 'strudel', code: padRef.current?.getCode() || '', kit: cleanKit, trajectory };
+    return {
+      environment: environmentId,
+      code: padRef.current?.getCode() || '',
+      kit: cleanKit,
+      trajectories,
+      trajectory, // the active environment's timeline, for older readers
+    };
   };
 
   const handleSave = async (meta) => { // create a NEW composition (from the Save dialog)
@@ -406,7 +428,14 @@ export default function App() {
   const handleOpen = (seq) => {
     const st = seq.unitState || {};
     setKit((Array.isArray(st.kit) ? st.kit : []).map((k) => ({ ...k, url: k.previewUrl, rendering: false })));
-    setTrajectory(Array.isArray(st.trajectory) ? st.trajectory : []);
+    const envFromState = st.environment || 'strudel';
+    setEnvironmentId(envFromState);
+    // Accept both shapes: the per-environment map, or a single legacy array.
+    setTrajectories(
+      st.trajectories && typeof st.trajectories === 'object' && !Array.isArray(st.trajectories)
+        ? st.trajectories
+        : { [envFromState]: Array.isArray(st.trajectory) ? st.trajectory : [] }
+    );
     setScrubIndex(null);
     padRef.current?.setCode(st.code || '');
     // Only make it the "current" (in-place-savable) composition if the signed-in
@@ -523,7 +552,6 @@ export default function App() {
     }
   };
 
-  const env = getEnvironment('strudel');
   const renderAll = () => {
     kit.forEach((k) => { if (!k.url && !k.rendering) renderKitEntry(k); });
   };
@@ -713,17 +741,23 @@ export default function App() {
 
       <header className="topbar">
         <div className="brand">Synth.is · <span className="brand-accent">Composing</span></div>
-        <a className="btn ghost" href={api.SYNTHIS_APP_URL} title="Back to Synth.is">← Synth.is</a>
+        {/* Inside Live the app runs in a modal WebView with no way back, so this
+            link would navigate away from (and effectively close) the dialog. */}
+        {!ABLETON && (
+          <a className="btn ghost" href={api.SYNTHIS_APP_URL} title="Back to Synth.is">← Synth.is</a>
+        )}
         {/* AGPL-3.0 §13: this app is served over a network, so the corresponding
-            source must be offered to the people using it. Keep this link visible. */}
+            source must be offered to the people using it. This covers the WHOLE
+            app (not just the Strudel parts), so keep it app-level and always
+            visible — don't tuck it inside a per-environment tab. */}
         <a
-          className="btn ghost"
+          className="source-link"
           href="https://github.com/synth-is/kromosynth-composing"
           target="_blank"
           rel="noopener noreferrer"
-          title="Source code for this app (AGPL-3.0). It embeds Strudel (strudel.cc), also AGPL-3.0."
+          title="Source code for this app"
         >
-          Source (AGPL-3.0)
+          source
         </a>
         <div className="spacer" />
         {ABLETON && (
