@@ -4,9 +4,8 @@ A standalone live-coding companion for **Synth.is**: browse evolved sounds, load
 samples into a live-coding environment (**Strudel** first), and save your compositions to
 your Synth.is account so you can recall them later.
 
-**Licence: AGPL-3.0-or-later. This repository is the corresponding source** for the
-instance running at [composing.synth.is](https://composing.synth.is). The app embeds
-[Strudel](https://strudel.cc), which is also AGPL-3.0-or-later. Full notice at the bottom.
+This repository is the source for the instance at
+[composing.synth.is](https://composing.synth.is).
 
 An exploration, and a companion to the main Synth.is app rather than part of it: it runs
 on its own origin and talks to the Synth.is backends over HTTP.
@@ -95,16 +94,8 @@ docs/
 
 Copyright (C) 2026  Björn Þór Jónsson
 
-This program is free software: you can redistribute it and/or modify it under the
-terms of the GNU Affero General Public License as published by the Free Software
-Foundation, either version 3 of the License, or (at your option) any later version.
-
-This program is distributed in the hope that it will be useful, but WITHOUT ANY
-WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
-PARTICULAR PURPOSE.  See the GNU Affero General Public License for more details.
-
-You should have received a copy of the GNU Affero General Public License along with
-this program.  If not, see <https://www.gnu.org/licenses/>.
+Licensed under the GNU Affero General Public License, version 3 or later. See
+[`LICENSE`](LICENSE), or <https://www.gnu.org/licenses/>.
 
 Embeds [Strudel](https://strudel.cc) (`@strudel/repl`, `@strudel/webaudio`),
 AGPL-3.0-or-later.
