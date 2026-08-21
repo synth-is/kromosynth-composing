@@ -714,6 +714,17 @@ export default function App() {
       <header className="topbar">
         <div className="brand">Synth.is · <span className="brand-accent">Composing</span></div>
         <a className="btn ghost" href={api.SYNTHIS_APP_URL} title="Back to Synth.is">← Synth.is</a>
+        {/* AGPL-3.0 §13: this app is served over a network, so the corresponding
+            source must be offered to the people using it. Keep this link visible. */}
+        <a
+          className="btn ghost"
+          href="https://github.com/synth-is/kromosynth-composing"
+          target="_blank"
+          rel="noopener noreferrer"
+          title="Source code for this app (AGPL-3.0). It embeds Strudel (strudel.cc), also AGPL-3.0."
+        >
+          Source (AGPL-3.0)
+        </a>
         <div className="spacer" />
         {ABLETON && (
           <>
