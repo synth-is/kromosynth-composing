@@ -7,11 +7,19 @@ import { isAbletonHost, buildStemsSelection, sendToLive } from './lib/ableton.js
 import { bytesToBase64 } from './lib/wav.js';
 import { downloadWav, DEFAULT_BOUNCE } from './lib/offlineRender.js';
 import { renderToWavUrl } from './lib/renderClient.js';
-import { getEnvironment } from './lib/environments.js';
-import { conceptsByCategory, conceptNames, transforms as conceptTransforms, explainConcepts } from './lib/concepts.js';
+import { getEnvironment, ENVIRONMENT_IDS } from './lib/environments.js';
+import { conceptsByCategory, conceptNames, transforms as conceptTransforms, explainConcepts, hasConcepts } from './lib/concepts.js';
 import * as llm from './lib/llm.js';
 
 const ABLETON = isAbletonHost();
+
+// LAZY on purpose. CsoundPad pulls in @csound/browser, which is 2.6 MB with the
+// wasm inlined — a static import puts all of it in the main bundle for people who
+// only ever open the Strudel tab. It loads the first time the Csound tab is
+// selected (or a saved Csound composition is opened) and stays mounted after that,
+// which is what the "both pads stay mounted" rule actually requires: never
+// UNmount, not mount both up front.
+const CsoundPad = React.lazy(() => import('./components/CsoundPad.jsx'));
 
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
@@ -59,7 +67,16 @@ function groupSounds(sounds, mode) {
 }
 
 export default function App() {
-  const padRef = useRef(null);
+  // Both pads stay MOUNTED and the inactive one is hidden by the tabs. StrudelPad's
+  // web component is built once for the page's lifetime (see its header) and
+  // CsoundPad guards its CodeMirror the same way, so unmounting on a tab switch
+  // would leave a dead editor behind.
+  const strudelPadRef = useRef(null);
+  const csoundPadRef = useRef(null);
+  // Code destined for a pad that hasn't mounted yet (the lazy Csound one). Applied
+  // by that pad's onReady — otherwise opening a saved Csound composition would
+  // setCode on a null ref and silently lose the buffer.
+  const pendingCodesRef = useRef({});
   const auditionRef = useRef(null);
   const replayAfterRenderRef = useRef(false);
   // Lets an AI (or other labelled) edit stamp the next trajectory snapshot; consumed by handleEval.
@@ -98,7 +115,10 @@ export default function App() {
   const [currentSequence, setCurrentSequence] = useState(null); // { id, title, description, visibility, tags }
   const [saveInitialTitle, setSaveInitialTitle] = useState('');
   const [pendingOpenId, setPendingOpenId] = useState(null); // ?seq=<id> deep link
-  const [padReady, setPadReady] = useState(false);
+  // Ready per environment. The ?seq deep link waits for both, since a saved
+  // composition can carry a buffer for either.
+  const [padsReady, setPadsReady] = useState({});
+  const [csoundLoaded, setCsoundLoaded] = useState(false); // has the lazy pad been pulled in?
   const [showConcepts, setShowConcepts] = useState(false);
   const [selection, setSelection] = useState(null); // { from, to, text } | null (editor selection)
   const [explainItems, setExplainItems] = useState(null); // concept[] | null ("explain this")
@@ -110,6 +130,59 @@ export default function App() {
   const [aiStatus, setAiStatus] = useState(null); // { kind:'info'|'error', text } | null
 
   const env = getEnvironment(environmentId);
+
+  // Reads like a ref, but resolves to whichever pad the active tab owns. Both pads
+  // are mounted at once, so a single `ref` can't be moved between them — and this
+  // keeps every `padRef.current?.x` call site below correct without threading the
+  // environment through all of them.
+  const padRef = {
+    get current() { return environmentId === 'csound' ? csoundPadRef.current : strudelPadRef.current; },
+  };
+  const padReady = !!padsReady.strudel && (!csoundLoaded || !!padsReady.csound);
+  const markPadReady = (id) => setPadsReady((p) => (p[id] ? p : { ...p, [id]: true }));
+  const padRefFor = (id) => (id === 'csound' ? csoundPadRef : strudelPadRef);
+
+  /** setCode now, or as soon as that pad exists. */
+  const applyCode = (id, code) => {
+    if (code == null) return;
+    const ref = padRefFor(id);
+    if (ref.current) ref.current.setCode(code);
+    else pendingCodesRef.current[id] = code;
+  };
+
+  // Handlers bound to a specific pad. The environment check matters because the
+  // hidden pad is still mounted: an eval or selection leaking from it would land in
+  // the wrong environment's trajectory.
+  const padEvents = (id) => ({
+    onEval: (code) => { if (id === environmentId) handleEval(code); },
+    onReady: () => {
+      markPadReady(id);
+      const pending = pendingCodesRef.current[id];
+      if (pending != null) {
+        pendingCodesRef.current[id] = undefined;
+        padRefFor(id).current?.setCode(pending);
+      }
+    },
+    onSelectionChange: (sel) => {
+      if (id !== environmentId) return;
+      setSelection(sel);
+      if (!sel) setExplainItems(null);
+    },
+  });
+
+  // ONE environment sounds at a time (docs/CSOUND_PLAN.md §6) — reconciling two
+  // clocks and two graphs is explicitly out of scope for v1. `padRef` still
+  // resolves to the OUTGOING pad here, which is exactly the one to stop.
+  const switchEnvironment = (id) => {
+    if (id === environmentId) return;
+    try { padRef.current?.stop?.(); } catch { /* ignore */ }
+    if (id === 'csound') setCsoundLoaded(true);
+    setEnvironmentId(id);
+    setSelection(null);
+    setExplainItems(null);
+    setScrubIndex(null);
+  };
+
   // Timeline of the active environment. setTrajectory keeps the existing call
   // signature (value or updater) so nothing downstream had to change.
   const trajectory = trajectories[environmentId] || [];
@@ -230,7 +303,7 @@ export default function App() {
       rendering: false,
     };
     setKit((prev) => [...prev, entry]);
-    flash(`Added as s("${name}")`);
+    flash(`Added as ${env.sampleToken(name)}`);
     // Use the pre-rendered preview WAV when the sound has one (instant); only render
     // on demand when it doesn't. (Preview presence comes from audio_preview_url.)
     if (!entry.previewUrl) renderKitEntry(entry);
@@ -276,7 +349,7 @@ export default function App() {
   }, [flash]);
 
   const copyToken = async (name) => {
-    const token = `s("${name}")`;
+    const token = env.sampleToken(name);
     try { await navigator.clipboard.writeText(token); flash(`Copied ${token}`); }
     catch { flash(`Type: ${token}`); }
   };
@@ -339,7 +412,13 @@ export default function App() {
     const cleanKit = kit.map(({ url, rendering, ...rest }) => rest);
     return {
       environment: environmentId,
-      code: padRef.current?.getCode() || '',
+      code: padRef.current?.getCode() || '', // the active buffer, for older readers
+      // Every environment's buffer, so working in one tab and saving doesn't
+      // silently discard what's in the other.
+      codes: {
+        strudel: strudelPadRef.current?.getCode?.() ?? '',
+        csound: csoundPadRef.current?.getCode?.() ?? pendingCodesRef.current.csound ?? '',
+      },
       kit: cleanKit,
       trajectories,
       trajectory, // the active environment's timeline, for older readers
@@ -437,7 +516,12 @@ export default function App() {
         : { [envFromState]: Array.isArray(st.trajectory) ? st.trajectory : [] }
     );
     setScrubIndex(null);
-    padRef.current?.setCode(st.code || '');
+    // Restore every environment's buffer; older saves only carry the active one.
+    const codes = (st.codes && typeof st.codes === 'object') ? st.codes : { [envFromState]: st.code || '' };
+    // Pull in the lazy Csound pad if this composition has anything for it.
+    if (envFromState === 'csound' || codes.csound != null) setCsoundLoaded(true);
+    applyCode('strudel', codes.strudel);
+    applyCode('csound', codes.csound);
     // Only make it the "current" (in-place-savable) composition if the signed-in
     // user owns it; otherwise it's a starting point and Save creates their own copy.
     const owned = user && seq.userId === user.id;
@@ -501,20 +585,24 @@ export default function App() {
    * it works inside Live's embedded WebView (no screen/tab capture involved).
    * target: 'download' | 'live'
    */
-  const runBounce = async ({ fromCycle, toCycle, sampleRate, target }) => {
+  const runBounce = async ({ from, to, sampleRate, target }) => {
+    if (!env.renderOffline) { flash(`${env.label} can’t bounce offline yet`); return; }
     const pattern = padRef.current?.getPattern?.();
     const cps = padRef.current?.getCps?.();
     if (!pattern) { flash('Press Play once so there’s a pattern to bounce'); return; }
-    if (!env.renderOffline) { flash('This environment can’t bounce offline'); return; }
     setBouncing(true);
     setBounceProgress(0);
     try {
       flash('Bouncing offline…');
+      // The range means different things per environment (env.bounceUnits): cycles
+      // for Strudel, seconds for Csound.
+      const range = env.bounceUnits === 'seconds'
+        ? { fromSeconds: from, toSeconds: to }
+        : { fromCycle: from, toCycle: to };
       const { wav, durationSecs, skipped, total } = await env.renderOffline({
         pattern,
         cps,
-        fromCycle,
-        toCycle,
+        ...range,
         sampleRate,
         kitMap: getKitMap(),
         onProgress: setBounceProgress,
@@ -527,7 +615,7 @@ export default function App() {
         // see docs/ABLETON_BRIDGE.md for the file/URL hand-off that lifts this.
         if (wav.length > 40 * 1024 * 1024) {
           flash(`Bounce is ${(wav.length / 1048576) | 0} MB — too big to send inline. Download it and drag it into Live.`);
-          downloadWav(wav, `${base}-${fromCycle}-${toCycle}.wav`);
+          downloadWav(wav, `${base}-${from}-${to}.wav`);
           return;
         }
         const ok = sendToLive({
@@ -541,7 +629,7 @@ export default function App() {
         }, abletonResume());
         flash(ok ? `Sent ${secs}s bounce to Live${warn}` : 'Not in Live — bounce logged to console');
       } else {
-        downloadWav(wav, `${base}-${fromCycle}-${toCycle}.wav`);
+        downloadWav(wav, `${base}-${from}-${to}.wav`);
         flash(`Bounced ${secs}s — downloaded${warn}`);
       }
     } catch (e) {
@@ -590,10 +678,17 @@ export default function App() {
     flash(`Inserted: ${concept.label}`);
   };
   const explainSelection = () => {
-    if (selection) setExplainItems(explainConcepts(selection.text));
+    if (selection) setExplainItems(explainConcepts(selection.text, environmentId));
   };
 
   // --- Ask AI (plain-English edits via the user's own endpoint) ---
+  // The model's knowledge of the language comes from OUR concept library
+  // (buildReference in lib/concepts.js). Without one it would fall back on whatever
+  // it remembers, which for Csound means the 6.x idioms this build rejects — so the
+  // bar stays off until step 6 lands CSOUND_CONCEPTS.
+  const aiAvailable = hasConcepts(environmentId);
+  const aiUnavailableReason = `AI edits for ${env.label} arrive with its Concepts library.`;
+
   const saveAiEndpoint = (cfg) => {
     llm.saveEndpoint(cfg);
     setAiEndpoint(cfg);
@@ -625,7 +720,7 @@ export default function App() {
     let check = await padRef.current?.validate?.(out);
     if (check && !check.ok) {
       setAiStatus({ kind: 'info', text: `Didn't run (${briefErr(check.error)}) — asking for a fix…` });
-      const repair = `${instruction}\n\nYour previous attempt did not run. Error:\n${check.error}\nReturn corrected code that runs in this version of Strudel, using only functions that exist. Output only code.`;
+      const repair = `${instruction}\n\nYour previous attempt did not run. Error:\n${check.error}\nReturn corrected code that runs in this version of ${env.label}, using only functions that exist. Output only code.`;
       const fixed = ((await llm.askEdit({ instruction: repair, code, selection, kit, env, endpoint: aiEndpoint })).code || '').trim();
       if (fixed) { out = fixed; check = await padRef.current?.validate?.(out); }
     }
@@ -639,6 +734,7 @@ export default function App() {
   const askAi = async (instruction) => {
     const text = (instruction || '').trim();
     if (!text) return;
+    if (!aiAvailable) { setAiStatus({ kind: 'error', text: aiUnavailableReason }); return; }
     if (!llm.isConfigured(aiEndpoint)) { setShowAiSettings(true); return; }
     const code = padRef.current?.getCode?.() ?? '';
     const sel = padRef.current?.getSelection?.() || null;
@@ -663,6 +759,7 @@ export default function App() {
   // --- Fit a sound in: describe the kit sound, then ask the model to arrange it ---
   const fitSoundIn = async (entry) => {
     if (!entry) return;
+    if (!aiAvailable) { flash(aiUnavailableReason); return; }
     if (!llm.isConfigured(aiEndpoint)) { setShowAiSettings(true); return; }
     setAiBusy(true);
     flash(`Describing ${entry.name}…`);
@@ -675,9 +772,10 @@ export default function App() {
       const labelBits = desc?.perceptual_labels ? Object.values(desc.perceptual_labels).filter(Boolean) : [];
       const sonic = [...new Set([...(desc?.sound_type ? [desc.sound_type] : []), ...labelBits, ...tags])].join(', ');
       const code = padRef.current?.getCode?.() ?? '';
+      const token = env.sampleToken(entry.name);
       const instruction = sonic
-        ? `Weave the existing kit sound s("${entry.name}") into this pattern so it fits musically. That sound is: ${sonic}. Keep what's already there and add this sound tastefully — as rhythm, a layer, or a complementary part.`
-        : `Weave the existing kit sound s("${entry.name}") into this pattern so it fits musically. Keep what's already there and add it tastefully.`;
+        ? `Weave the existing kit sound ${token} into this pattern so it fits musically. That sound is: ${sonic}. Keep what's already there and add this sound tastefully — as rhythm, a layer, or a complementary part.`
+        : `Weave the existing kit sound ${token} into this pattern so it fits musically. Keep what's already there and add it tastefully.`;
       flash(`Fitting ${entry.name} in…`);
       const { code: out } = await llm.askEdit({ instruction, code, selection: null, kit, env, endpoint: aiEndpoint });
       const clean = (out || '').trim();
@@ -767,7 +865,14 @@ export default function App() {
             <span style={{ width: 10 }} />
           </>
         )}
-        <button className="btn ghost" onClick={() => setShowBounce(true)} title="Render the pattern to a WAV (offline, faster than realtime)">
+        <button
+          className="btn ghost"
+          onClick={() => setShowBounce(true)}
+          disabled={!env.renderOffline}
+          title={env.renderOffline
+            ? 'Render to a WAV (offline, faster than realtime)'
+            : `Offline bounce for ${env.label} isn’t wired up yet`}
+        >
           {bouncing ? `Bouncing… ${Math.round(bounceProgress * 100)}%` : 'Bounce…'}
         </button>
         <button className="btn ghost" onClick={() => setShowOpen(true)} title="Open a composition — yours, or anyone's public one">Open…</button>
@@ -896,13 +1001,13 @@ export default function App() {
               <span className="muted small">click a name to copy · ⚙ for render settings</span>
             </div>
             <div className="kit-chips">
-              {kit.length === 0 && <span className="muted">Add sounds to register them as Strudel samples.</span>}
+              {kit.length === 0 && <span className="muted">Add sounds to use them in your code.</span>}
               {kit.map((k) => {
                 const custom = !isDefaultSettings(k.settings);
                 const marker = k.rendering ? '⋯ ' : !k.url ? '○ ' : custom ? '● ' : '';
                 return (
                   <span className="chip" key={k.name}>
-                    <button className="chip-name" title='Copy s("name")' onClick={() => copyToken(k.name)}>
+                    <button className="chip-name" title={`Copy ${env.sampleToken(k.name)}`} onClick={() => copyToken(k.name)}>
                       {marker}{k.name}
                     </button>
                     <button className="chip-x" title="Fit this sound into the pattern (AI)" disabled={aiBusy} onClick={() => fitSoundIn(k)}>✦</button>
@@ -922,6 +1027,22 @@ export default function App() {
                 onClose={() => setSettingsFor(null)}
               />
             )}
+          </div>
+
+          {/* The sound browser and the kit are SHARED, above the tabs; everything
+              below belongs to the active environment (docs/CSOUND_PLAN.md §6). The
+              header's source link stays app-level and must not move in here. */}
+          <div className="source-toggle" style={{ margin: '10px 0 2px' }}>
+            {ENVIRONMENT_IDS.map((id) => (
+              <button
+                key={id}
+                className={environmentId === id ? 'seg active' : 'seg'}
+                onClick={() => switchEnvironment(id)}
+                title={`Compose in ${getEnvironment(id).label}`}
+              >
+                {getEnvironment(id).label}
+              </button>
+            ))}
           </div>
 
           {trajectory.length > 0 && (
@@ -946,7 +1067,7 @@ export default function App() {
           {selection && (
             <SelectionBar
               selection={selection}
-              transforms={conceptTransforms('strudel', true)}
+              transforms={conceptTransforms(environmentId, true)}
               explainItems={explainItems}
               onApply={applyTransform}
               onExplain={explainSelection}
@@ -958,6 +1079,7 @@ export default function App() {
             configured={llm.isConfigured(aiEndpoint)}
             busy={aiBusy}
             hasSelection={!!selection}
+            disabledReason={aiAvailable ? null : aiUnavailableReason}
             onAsk={askAi}
             onOpenSettings={() => setShowAiSettings(true)}
           />
@@ -967,13 +1089,23 @@ export default function App() {
             </div>
           )}
 
-          <StrudelPad
-            ref={padRef}
-            getKitMap={getKitMap}
-            onEval={handleEval}
-            onReady={() => setPadReady(true)}
-            onSelectionChange={(sel) => { setSelection(sel); if (!sel) setExplainItems(null); }}
-          />
+          {/* Both pads stay mounted once created; the tabs only change which is
+              visible. Csound mounts on first use — see the lazy import up top. */}
+          <div style={{ display: environmentId === 'strudel' ? 'block' : 'none' }}>
+            <StrudelPad ref={strudelPadRef} getKitMap={getKitMap} {...padEvents('strudel')} />
+          </div>
+          {csoundLoaded && (
+            <div style={{ display: environmentId === 'csound' ? 'block' : 'none' }}>
+              <React.Suspense fallback={<div className="pad"><div className="pad-toolbar"><span className="pad-status">loading Csound…</span></div></div>}>
+                <CsoundPad
+                  ref={csoundPadRef}
+                  initialCode={getEnvironment('csound').makeStarter([])}
+                  getKitMap={getKitMap}
+                  {...padEvents('csound')}
+                />
+              </React.Suspense>
+            </div>
+          )}
         </section>
       </main>
 
@@ -984,6 +1116,7 @@ export default function App() {
       {showOpen && <OpenDialog signedIn={!!user} onClose={() => setShowOpen(false)} onOpen={handleOpen} />}
       {showBounce && (
         <BounceDialog
+          env={env}
           cps={padRef.current?.getCps?.()}
           ableton={ABLETON}
           onClose={() => setShowBounce(false)}
@@ -991,7 +1124,7 @@ export default function App() {
         />
       )}
       {showConcepts && (
-        <ConceptsModal kit={kit} onInsert={insertConcept} onCopy={copyPattern} onClose={() => setShowConcepts(false)} />
+        <ConceptsModal envId={environmentId} env={env} kit={kit} onInsert={insertConcept} onCopy={copyPattern} onClose={() => setShowConcepts(false)} />
       )}
       {showAiSettings && (
         <AiSettingsDialog
@@ -1057,9 +1190,7 @@ function HintsBar({ env, kit, onInsertStarter, onSurprise, onCopy, onBrowseConce
   return (
     <div className="hints">
       <div className="hints-head">
-        <span className="muted small">
-          Tip: only the <em>last</em> expression plays. <strong>Select part of your code</strong> to transform it, or open <strong>Concepts</strong> to browse what's possible.
-        </span>
+        <span className="muted small">{env.tip}</span>
         <span className="spacer" />
         <a className="hints-doc" href={env.docsUrl} target="_blank" rel="noopener noreferrer">{env.label} guide ↗</a>
       </div>
@@ -1118,9 +1249,9 @@ function SelectionBar({ selection, transforms, explainItems, onApply, onExplain,
   );
 }
 
-function ConceptsModal({ kit, onInsert, onCopy, onClose }) {
+function ConceptsModal({ envId, env, kit, onInsert, onCopy, onClose }) {
   const names = conceptNames(kit);
-  const groups = conceptsByCategory('strudel');
+  const groups = conceptsByCategory(envId);
   const [midi, setMidi] = useState(null); // null | 'loading' | { supported, inputs, outputs }
   const loadMidi = async () => {
     setMidi('loading');
@@ -1135,10 +1266,20 @@ function ConceptsModal({ kit, onInsert, onCopy, onClose }) {
     } catch (e) { setMidi({ supported: false, error: e.message }); }
   };
   return (
-    <Modal title="Concepts — what you can do" onClose={onClose}>
+    <Modal title={`Concepts — what you can do in ${env.label}`} onClose={onClose}>
+      {groups.length === 0 ? (
+        <p className="muted" style={{ marginTop: 0 }}>
+          The {env.label} concept library isn’t written yet. Until it is, the
+          starter, Surprise me and the hints above are the way in — and the{' '}
+          <a href={env.docsUrl} target="_blank" rel="noopener noreferrer">{env.label} manual ↗</a>{' '}
+          covers the rest.
+        </p>
+      ) : (
+      <>
       <p className="muted small" style={{ marginTop: 0 }}>
         Insert an example to try it with your kit, then tweak and play — or select code in the editor to transform it.
       </p>
+      {envId === 'strudel' && (
       <div className="midi-devices">
         <div className="midi-devices-head">
           <span className="muted small">MIDI devices — for the Control / MIDI recipes</span>
@@ -1161,6 +1302,7 @@ function ConceptsModal({ kit, onInsert, onCopy, onClose }) {
               </div>
         )}
       </div>
+      )}
       <div className="concepts-scroll">
         {groups.map((g) => (
           <div key={g.category} className="concept-group">
@@ -1190,6 +1332,8 @@ function ConceptsModal({ kit, onInsert, onCopy, onClose }) {
           </div>
         ))}
       </div>
+      </>
+      )}
       <div className="modal-actions">
         <button className="btn ghost" onClick={onClose}>Close</button>
       </div>
@@ -1208,7 +1352,7 @@ function SettingsPanel({ entry, onChange, onReset, onRender, onClose }) {
         Render settings — <code>{entry.name}</code>
       </div>
       <div className="muted small" style={{ marginBottom: 8 }}>
-        Custom settings render the genome on demand so they’re audible in Strudel. Add the
+        Custom settings render the genome on demand so they’re audible in your code. Add the
         same sound again for a second key at different settings. They also flow to “→ Live (stems)”.
       </div>
       <div className="settings-grid">
@@ -1385,29 +1529,33 @@ function OpenDialog({ signedIn, onClose, onOpen }) {
   );
 }
 
-function BounceDialog({ cps, ableton, onClose, onBounce }) {
+function BounceDialog({ env, cps, ableton, onClose, onBounce }) {
+  // The range is not universal: Strudel counts CYCLES (and needs the tempo to turn
+  // them into a duration), Csound counts SECONDS. The environment says which.
+  const inCycles = (env.bounceUnits || 'cycles') === 'cycles';
+  const unit = inCycles ? 'cycle' : 'second';
   const hasCps = typeof cps === 'number' && cps > 0;
-  const [fromCycle, setFromCycle] = useState(DEFAULT_BOUNCE.fromCycle);
-  const [toCycle, setToCycle] = useState(DEFAULT_BOUNCE.toCycle);
+  const [from, setFrom] = useState(inCycles ? DEFAULT_BOUNCE.fromCycle : 0);
+  const [to, setTo] = useState(inCycles ? DEFAULT_BOUNCE.toCycle : 8);
   const [sampleRate, setSampleRate] = useState(DEFAULT_BOUNCE.sampleRate);
-  const cycles = Math.max(0, toCycle - fromCycle);
-  const secs = hasCps ? cycles / cps : null;
-  const valid = cycles > 0 && sampleRate >= 8000;
-  const opts = { fromCycle, toCycle, sampleRate };
+  const span = Math.max(0, to - from);
+  const secs = inCycles ? (hasCps ? span / cps : null) : span;
+  const valid = span > 0 && sampleRate >= 8000;
+  const opts = { from, to, sampleRate };
   return (
     <Modal title="Bounce to WAV" onClose={onClose}>
       <p className="muted small" style={{ marginTop: 0 }}>
-        Renders the pattern <em>offline</em> — faster than realtime, so long pieces don’t play
-        through in real time, and the result is deterministic and cycle-accurate.
+        Renders <em>offline</em> — faster than realtime, so long pieces don’t play
+        through in real time, and the result is deterministic.
       </p>
       <div className="settings-grid">
-        <label className="field">Start cycle
-          <input type="number" min="0" step="1" value={fromCycle}
-            onChange={(e) => setFromCycle(Math.max(0, Number(e.target.value) || 0))} autoFocus />
+        <label className="field">Start ({unit})
+          <input type="number" min="0" step={inCycles ? '1' : '0.5'} value={from}
+            onChange={(e) => setFrom(Math.max(0, Number(e.target.value) || 0))} autoFocus />
         </label>
-        <label className="field">End cycle
-          <input type="number" min="1" step="1" value={toCycle}
-            onChange={(e) => setToCycle(Math.max(1, Number(e.target.value) || 1))} />
+        <label className="field">End ({unit})
+          <input type="number" min="0" step={inCycles ? '1' : '0.5'} value={to}
+            onChange={(e) => setTo(Math.max(0, Number(e.target.value) || 0))} />
         </label>
         <label className="field">Sample rate
           <select value={sampleRate} onChange={(e) => setSampleRate(Number(e.target.value))}>
@@ -1418,9 +1566,12 @@ function BounceDialog({ cps, ableton, onClose, onBounce }) {
         </label>
       </div>
       <div className="muted small" style={{ margin: '4px 0 12px' }}>
-        {cycles} cycle{cycles === 1 ? '' : 's'}
-        {secs != null ? ` ≈ ${secs.toFixed(2)} s at the current tempo (cps ${cps.toFixed(3)})` : ' — press Play once to read the tempo'}.
-        A whole number of cycles loops cleanly.
+        {span} {unit}{span === 1 ? '' : 's'}
+        {inCycles
+          ? (secs != null
+            ? ` ≈ ${secs.toFixed(2)} s at the current tempo (cps ${cps.toFixed(3)}). A whole number of cycles loops cleanly.`
+            : ' — press Play once to read the tempo.')
+          : '.'}
       </div>
       <div className="modal-actions">
         <button className="btn ghost" onClick={onClose}>Cancel</button>
@@ -1436,28 +1587,33 @@ function BounceDialog({ cps, ableton, onClose, onBounce }) {
   );
 }
 
-function AskAiBar({ configured, busy, hasSelection, onAsk, onOpenSettings }) {
+function AskAiBar({ configured, busy, hasSelection, disabledReason, onAsk, onOpenSettings }) {
   const [text, setText] = useState('');
   const submit = () => { const t = text.trim(); if (t) onAsk(t); };
+  const off = !!disabledReason;
   return (
-    <div className="askai" style={{ margin: '8px 0' }}>
+    <div className="askai" style={{ margin: '8px 0', opacity: off ? 0.55 : 1 }}>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
         <input
           className="search"
           style={{ flex: 1 }}
-          placeholder={configured
-            ? (hasSelection ? 'Ask AI to change the selection…' : 'Ask AI to change the code…')
-            : 'Ask AI to change the code…  (⚙ set up an endpoint first)'}
+          placeholder={off
+            ? disabledReason
+            : configured
+              ? (hasSelection ? 'Ask AI to change the selection…' : 'Ask AI to change the code…')
+              : 'Ask AI to change the code…  (⚙ set up an endpoint first)'}
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); } }}
-          disabled={busy}
+          disabled={busy || off}
         />
-        <button className="btn tiny" onClick={submit} disabled={busy || !text.trim()}>{busy ? 'Asking…' : 'Ask AI'}</button>
-        <button className="btn tiny ghost" title="AI endpoint settings" onClick={onOpenSettings}>⚙</button>
+        <button className="btn tiny" onClick={submit} disabled={busy || off || !text.trim()}>{busy ? 'Asking…' : 'Ask AI'}</button>
+        <button className="btn tiny ghost" title="AI endpoint settings" onClick={onOpenSettings} disabled={off}>⚙</button>
       </div>
       <div className="muted small" style={{ marginTop: 4 }}>
-        {hasSelection ? 'Rewrites the selected code' : 'Rewrites the whole buffer'} · runs on your own endpoint (local or cloud) · lands as an undoable trajectory step.
+        {off
+          ? 'The model is grounded in this app’s own concept library, so it stays off until that library exists rather than guessing.'
+          : `${hasSelection ? 'Rewrites the selected code' : 'Rewrites the whole buffer'} · runs on your own endpoint (local or cloud) · lands as an undoable trajectory step.`}
       </div>
     </div>
   );
