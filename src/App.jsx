@@ -770,7 +770,7 @@ export default function App() {
         <button className="btn ghost" onClick={() => setShowBounce(true)} title="Render the pattern to a WAV (offline, faster than realtime)">
           {bouncing ? `Bouncing… ${Math.round(bounceProgress * 100)}%` : 'Bounce…'}
         </button>
-        <button className="btn ghost" onClick={() => setShowOpen(true)} disabled={!user}>Open…</button>
+        <button className="btn ghost" onClick={() => setShowOpen(true)} title="Open a composition — yours, or anyone's public one">Open…</button>
         {currentSequence && (
           <span className="who current-seq" title="Current composition">{currentSequence.title}</span>
         )}
@@ -981,7 +981,7 @@ export default function App() {
 
       {showLogin && <LoginDialog onClose={() => setShowLogin(false)} onLoggedIn={(u) => { setUser(u); setShowLogin(false); }} />}
       {showSave && <SaveDialog initialTitle={saveInitialTitle} onClose={() => setShowSave(false)} onSave={handleSave} />}
-      {showOpen && <OpenDialog onClose={() => setShowOpen(false)} onOpen={handleOpen} />}
+      {showOpen && <OpenDialog signedIn={!!user} onClose={() => setShowOpen(false)} onOpen={handleOpen} />}
       {showBounce && (
         <BounceDialog
           cps={padRef.current?.getCps?.()}
@@ -1316,25 +1316,68 @@ function SaveDialog({ onClose, onSave, initialTitle = '' }) {
   );
 }
 
-function OpenDialog({ onClose, onOpen }) {
+function OpenDialog({ signedIn, onClose, onOpen }) {
+  // Public compositions are browsable without signing in; that's the same thing
+  // "Open in Composing" does from the main app's feed, just discoverable here.
+  const [tab, setTab] = useState(signedIn ? 'mine' : 'public');
   const [items, setItems] = useState(null);
   const [error, setError] = useState('');
+
   useEffect(() => {
-    api.listMySequences().then(setItems).catch((e) => { setError(e.message || 'Failed to load'); setItems([]); });
-  }, []);
+    let cancelled = false;
+    setItems(null);
+    setError('');
+    const load = tab === 'mine' ? api.listMySequences() : api.listPublicSequences();
+    load
+      .then((list) => { if (!cancelled) setItems(list); })
+      .catch((e) => { if (!cancelled) { setError(e.message || 'Failed to load'); setItems([]); } });
+    return () => { cancelled = true; };
+  }, [tab]);
+
+  const when = (s) => {
+    const iso = s.updatedAt || s.updated_at || s.createdAt || s.created_at;
+    if (!iso) return null;
+    const d = new Date(iso);
+    return isNaN(d.getTime()) ? null : d.toLocaleDateString();
+  };
+
   return (
     <Modal title="Open composition" onClose={onClose}>
+      <div className="source-toggle" style={{ marginBottom: 10 }}>
+        <button
+          className={tab === 'mine' ? 'seg active' : 'seg'}
+          onClick={() => (signedIn ? setTab('mine') : null)}
+          disabled={!signedIn}
+          title={signedIn ? 'Your compositions' : 'Sign in to see your own compositions'}
+        >
+          Mine
+        </button>
+        <button className={tab === 'public' ? 'seg active' : 'seg'} onClick={() => setTab('public')}>
+          Public
+        </button>
+      </div>
       {items === null && <div className="muted">Loading…</div>}
       {error && <div className="error">{error}</div>}
-      {items && items.length === 0 && !error && <div className="muted">No saved compositions yet.</div>}
+      {items && items.length === 0 && !error && (
+        <div className="muted">{tab === 'mine' ? 'No saved compositions yet.' : 'No public compositions yet.'}</div>
+      )}
       <div className="open-list">
         {items?.map((s) => (
           <button className="open-row" key={s.id} onClick={() => onOpen(s)}>
             <span className="open-title">{s.title || 'Untitled'}</span>
-            <span className="open-sub">{(s.soundIds?.length || 0)} sounds · {s.visibility}</span>
+            <span className="open-sub">
+              {(s.soundIds?.length || 0)} sounds
+              {tab === 'mine' ? ` · ${s.visibility}` : ''}
+              {when(s) ? ` · ${when(s)}` : ''}
+            </span>
           </button>
         ))}
       </div>
+      {tab === 'public' && (
+        <div className="muted small" style={{ marginTop: 8 }}>
+          Opening someone else's composition is a starting point — Save creates your own copy.
+        </div>
+      )}
       <div className="modal-actions">
         <button className="btn ghost" onClick={onClose}>Close</button>
       </div>

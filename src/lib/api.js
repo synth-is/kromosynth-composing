@@ -408,6 +408,18 @@ export async function getSequence(id) {
 }
 
 /**
+ * Public compositions from everyone — no sign-in needed. Same shape as
+ * listMySequences. Opening one is effectively read-only: Save creates the
+ * viewer's own copy (see the ownership check in handleOpen).
+ */
+export async function listPublicSequences({ limit = 50, offset = 0 } = {}) {
+  const res = await fetch(`${RECOMMEND_URL}/api/user/sequences/public?limit=${limit}&offset=${offset}`);
+  if (!res.ok) throw new Error(await res.text() || 'Failed to load public compositions');
+  const list = unwrap(await res.json(), 'sequences');
+  return (Array.isArray(list) ? list : []).filter((s) => isComposingUnit(s.unitType));
+}
+
+/**
  * Save a composition. `state` = { code, kit: [{ name, soundId, url }], environment }.
  */
 export async function createSequence({ title, description = '', tags = [], visibility = 'private', state }) {
