@@ -43,7 +43,7 @@ export { KIT_DIR, kitFilePath };
 // Bump on every edit to this file. It prints to the browser console at module
 // evaluation AND into the in-app log, so "am I looking at stale code?" is a
 // glance rather than a debugging session — which it cost us once already.
-const ENGINE_REVISION = '2026-08-21f (init-pass validation)';
+const ENGINE_REVISION = '2026-08-21g (raw error fallback)';
 console.log('[csoundEngine] rev', ENGINE_REVISION);
 
 const LOG_LIMIT = 500;
@@ -104,6 +104,27 @@ function collectErrors(fromIndex) {
       || /^init error/i.test(t)
       || /cannot open|failed to open file|ftgen error/i.test(t)
       || /\berror:/i.test(t));
+}
+
+// Banner and bookkeeping lines Csound prints on every run. Excluded from the raw
+// fallback below so it shows what went wrong rather than what always happens.
+const NOISE = /^(--Csound version|\[commit|setting dummy|using libsndfile|displays suppressed|sr =|0dBFS|audio buffered|SECTION|resetting Csound|inactive allocs|overall amps|overall samples|Elapsed time|new alloc|rtevent|B\s|\d+ errors? in performance)/i;
+
+/**
+ * The last few things Csound said, whatever they were.
+ *
+ * `collectErrors` only recognises patterns we have met before, so a NEW kind of
+ * failure produced a bare "compileOrc returned -1" with no explanation — useless to
+ * the person and worse than useless in a repair prompt, which then asks a model to
+ * fix an error it was never shown. When we know something failed, showing the raw
+ * tail beats showing nothing.
+ */
+function rawSince(fromIndex, n = 4) {
+  return logLines.slice(fromIndex)
+    .map((l) => l.text.replace(/\s+/g, ' ').trim())
+    .filter((t) => t && !NOISE.test(t))
+    .slice(-n)
+    .join(' | ');
 }
 
 /** Turn an init failure into something the person can act on. */
@@ -382,7 +403,7 @@ export async function compileAndStart({ orc, sco = '', kitMap = null } = {}) {
   await settle();
   const orcErrs = collectErrors(orcFrom);
   if ((typeof status === 'number' && status !== 0) || orcErrs.length) {
-    throw new Error(orcErrs[0] || `Orchestra did not compile (status ${status}).`);
+    throw new Error(orcErrs[0] || rawSince(orcFrom) || `Orchestra did not compile (status ${status}).`);
   }
 
   // Csound ENDS the performance when the score runs out — the first spike run
@@ -416,7 +437,7 @@ export async function compileAndStart({ orc, sco = '', kitMap = null } = {}) {
   const initErrs = collectErrors(initFrom);
   if (startThrew || initErrs.length) {
     try { await cs.stop(); } catch { /* ignore */ }
-    throw new Error(explainInit(initErrs) || `Csound couldn't start: ${startThrew}`);
+    throw new Error(explainInit(initErrs) || rawSince(initFrom) || `Csound couldn't start: ${startThrew}`);
   }
   started = true;
 
@@ -494,7 +515,8 @@ export async function validateOrc(orc, { sco = '', kitMap = null } = {}) {
   emit();
   return {
     ok,
-    error: ok ? null : (explainInit(errs) || threw || `compileOrc returned ${status}`),
+    error: ok ? null
+      : (explainInit(errs) || threw || rawSince(from) || `compileOrc returned ${status}`),
   };
 }
 
@@ -540,5 +562,11 @@ function readWavHeader(bytes) {
 // So: any edit here forces a full page reload in dev.
 // ---------------------------------------------------------------------------
 if (import.meta.hot) {
-  import.meta.hot.accept(() => { window.location.reload(); });
+  import.meta.hot.accept(() => {
+    // Logged so that a reload originating HERE is distinguishable from one Vite
+    // does for its own reasons (a re-optimised dependency, say) and from a tab the
+    // browser killed. Three different causes, identical symptom.
+    console.warn('[csoundEngine] hot update — forcing a full reload (see the note above)');
+    window.location.reload();
+  });
 }

@@ -5,7 +5,7 @@ import { keymap } from '@codemirror/view';
 import { StreamLanguage } from '@codemirror/language';
 import { oneDark } from '@codemirror/theme-one-dark';
 import * as cs from '../lib/csoundEngine.js';
-import { suggest } from '../lib/csoundOpcodes.js';
+import { suggest, signatureOf } from '../lib/csoundOpcodes.js';
 
 /**
  * Csound editor pad — the sibling of StrudelPad, exposing the SAME imperative
@@ -69,33 +69,102 @@ const csoundLanguage = StreamLanguage.define({
 });
 
 /**
- * Turn "unable to find opcode with name: X" into something actionable.
+ * Turn a compiler complaint about an opcode into something actionable.
  *
- * This is the cheap half of grounding. A model asked for Csound reaches for
- * whatever it remembers — mostly 6.x material, and opcodes that never existed — and
- * the bare compiler error tells it only that it was wrong. Handing back the real
- * neighbours from THIS build's opcode list turns the repair pass from a guess into
- * a lookup, and it costs one index build (memoised) instead of stuffing thousands
- * of names into every prompt. See docs/CSOUND_PLAN.md §12.
+ * Csound has two distinct failures here and they need opposite answers:
+ *
+ *  - "unable to find opcode with NAME: X" — no such opcode. The useful reply is
+ *    the nearest real names, or, when nothing is close, that it was invented.
+ *  - "Unable to find opcode ENTRY for 'X'" — the opcode exists but no overload
+ *    takes those argument types. Nearest names are useless here; the real
+ *    signature is the whole answer, and we already have it in the index.
+ *
+ * Both go into the AI repair prompt and into the pad's status line, so a human
+ * typo gets the same help as the model's.
  */
 const UNKNOWN_OPCODE = /unable to find opcode with name:\s*([A-Za-z_][A-Za-z0-9_]*)/i;
+const WRONG_ARGS = /unable to find opcode entry for\s*'([A-Za-z_][A-Za-z0-9_]*)'/i;
 
-async function enrichError(error) {
+/**
+ * `aOut = opcodename arg, arg` — an opcode call written as an assignment.
+ *
+ * The single most persistent mistake a model makes here, and restating the rule in
+ * the preamble did not stop it. Showing the CORRECTED LINE is a different kind of
+ * instruction: nothing to interpret, nothing to generalise wrongly.
+ *
+ * Deliberately narrow. The functional form `aOut = moogladder(aSig, 800)` is
+ * legal and has no space before its parenthesis, so it doesn't match. Plain
+ * arithmetic like `aMix = aOne * 0.5` is legal too, so anything whose first token
+ * after the name is an operator is excluded.
+ */
+const ASSIGNED_OPCODE =
+  /^(\s*)([A-Za-z]\w*(?:\s*,\s*[A-Za-z]\w*)*)\s*=\s*([A-Za-z_]\w*)\s+(?![*+\-/%<>=&|^,)])(\S.*)$/;
+
+/** The corrected version of one line, or null if it isn't this mistake. */
+function fixAssignedOpcode(line) {
+  if (!line) return null;
+  const cut = line.indexOf(';');
+  const body = cut >= 0 ? line.slice(0, cut) : line;
+  const tail = cut >= 0 ? line.slice(cut) : '';
+  const m = ASSIGNED_OPCODE.exec(body.replace(/\s+$/, ''));
+  if (!m) return null;
+  const [, indent, outputs, opcode, args] = m;
+  return `${indent}${outputs} ${opcode} ${args}${tail ? `   ${tail}` : ''}`;
+}
+
+/** The source line an error points at, within the code that was compiled. */
+function lineAt(code, error) {
+  const at = /\bline (\d+)/i.exec(error || '');
+  if (!at) return null;
+  const line = String(code || '').split('\n')[Number(at[1]) - 1];
+  return line ? { n: Number(at[1]), text: line } : null;
+}
+
+function lintCsoundLine(code, error) {
+  const found = lineAt(code, error);
+  if (!found) return null;
+  const fixed = fixAssignedOpcode(found.text);
+  if (!fixed) return null;
+  return 'That line writes an opcode call as an assignment. A Csound opcode call takes no "=".'
+    + `\nReplace it with exactly:\n${fixed}`;
+}
+
+async function enrichError(error, code) {
   if (!error) return error;
+  const out = [error];
+
+  // Always show the line, whatever the error. Csound reports a number; a model
+  // handed only a number has to re-derive which of its own lines that was.
+  const found = lineAt(code, error);
+  if (found) out.push(`Line ${found.n}, which you wrote, reads:\n${found.text}`);
+
+  const lint = lintCsoundLine(code, error);
+  if (lint) { out.push(lint); return out.join('\n'); }
+
+  const wrong = WRONG_ARGS.exec(error);
+  if (wrong) {
+    try {
+      const sig = await signatureOf(wrong[1]);
+      if (sig) {
+        out.push(`"${wrong[1]}" does exist, but not with those argument types.\n${sig}`);
+        out.push('Use exactly these arguments, in exactly this order.');
+      }
+    } catch { /* the index is a nicety */ }
+    return out.join('\n');
+  }
+
   const m = UNKNOWN_OPCODE.exec(error);
-  if (!m) return error;
+  if (!m) return out.join('\n');
   try {
     const near = await suggest(m[1], 6);
     // No plausible neighbour means the name was invented rather than fumbled.
     // Saying so — and pointing back at the grounded list — beats offering the
     // closest strings in the corpus, which the model would take as permission.
-    if (!near.length) {
-      return `${error} — "${m[1]}" is not an opcode in this Csound build, and nothing close is. Use an opcode from the techniques listed above rather than inventing one.`;
-    }
-    return `${error} — "${m[1]}" does not exist in this Csound build. The nearest real opcodes are: ${near.join(', ')}.`;
-  } catch {
-    return error; // the index is a nicety; never let it break validation
-  }
+    out.push(near.length
+      ? `"${m[1]}" does not exist in this Csound build. The nearest real opcodes are: ${near.join(', ')}.`
+      : `"${m[1]}" is not an opcode in this Csound build, and nothing close is. Use an opcode from the techniques listed above rather than inventing one.`);
+  } catch { /* the index is a nicety; never let it break validation */ }
+  return out.join('\n');
 }
 
 const CsoundPad = forwardRef(function CsoundPad(
@@ -125,7 +194,7 @@ const CsoundPad = forwardRef(function CsoundPad(
       setIsPlaying(false);
       // Same treatment for a human typo as for the model's — if you reach for an
       // opcode that isn't here, the status line names the ones that are.
-      setNote(await enrichError(e.message || String(e)));
+      setNote(await enrichError(e.message || String(e), code));
       console.error('[CsoundPad] play failed:', e);
     }
   };
@@ -208,13 +277,34 @@ const CsoundPad = forwardRef(function CsoundPad(
       } catch (err) { console.error('[CsoundPad] replaceSelection failed:', err); return null; }
       return { from, to: newTo, text };
     },
+    /**
+     * Repair a mechanical syntax slip without asking the model again.
+     *
+     * The `=`-before-an-opcode mistake is deterministic to detect AND to fix, and
+     * a round trip to a local model for it costs a minute or more — sometimes past
+     * the timeout, so the whole edit is lost over a stray character. Returns
+     * corrected code, or null when it isn't a mistake we can fix ourselves.
+     */
+    autoFix: (code, error) => {
+      const src = code ?? getCode();
+      const { orc } = cs.splitCsoundCode(src);
+      const found = lineAt(orc, error);
+      if (!found) return null;
+      const fixed = fixAssignedOpcode(found.text);
+      if (!fixed || fixed === found.text) return null;
+      // Replace by TEXT, not by line number: the orchestra is a trimmed slice of
+      // the buffer, so its line numbering doesn't line up with the buffer's.
+      const next = src.replace(found.text, fixed);
+      return next === src ? null : next;
+    },
     // { ok, error } — compiles the orchestra AND parses the score, without
     // starting. Note it stops playback; see validateOrc's header.
     validate: async (code) => {
-      const { orc, sco } = cs.splitCsoundCode(code ?? getCode());
+      const src = code ?? getCode();
+      const { orc, sco } = cs.splitCsoundCode(src);
       try {
         const r = await cs.validateOrc(orc, { sco, kitMap: getKitMap?.() || {} });
-        return r.ok ? r : { ...r, error: await enrichError(r.error) };
+        return r.ok ? r : { ...r, error: await enrichError(r.error, orc) };
       } catch (e) { return { ok: false, error: e.message || String(e) }; }
     },
   }));

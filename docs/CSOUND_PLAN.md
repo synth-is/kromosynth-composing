@@ -924,6 +924,70 @@ its comments teach, and does the repair pass recover when it reaches for a 6.x
 idiom? The last of those is the interesting one — `outs` is the likeliest thing for
 it to emit, and the preamble names it explicitly.
 
+### The reference outgrew the context window
+
+A later Surprise came back as `syntax error, unexpected end of file, line 17` — and
+the rejected code ended mid-sentence, in the middle of a comment, with no closing
+fence. The model had not written a broken program; its answer had been **cut off**.
+
+The cause was ours. `buildReference` inlined each concept's example whole. For
+Strudel those are one-liners, which is why it was written that way. Csound examples
+are COMPLETE ORCHESTRAS — header, instrument, comments, score — and there are forty
+of them, so the system prompt had grown to many thousands of tokens without anyone
+looking. A 4B local model then has no room left to answer in.
+
+`compactExample()` now strips boilerplate, comments and score lines and keeps up to
+three opcode lines per concept. What a reference needs is which opcodes a technique
+uses and roughly how they combine; a full orchestra carries that in about one line
+of twenty.
+
+Two diagnostics so this doesn't recur invisibly:
+
+- `askEdit` logs the prompt size on every call. Prompt size grows silently with the
+  concept library, and nothing else would have shown it.
+- Truncation is now DETECTED and named. Both providers report it — OpenAI-compatible
+  as `finish_reason: "length"`, Anthropic as `stop_reason: "max_tokens"` — and we
+  were ignoring both, letting a cut-off answer reach the compiler and come back as a
+  syntax error the model never made. Naming it points at the real fix (shorter
+  prompt, bigger context) instead of at the model's competence.
+
+The generalisation, again: a limit that was fine when it was set stops being fine as
+the thing it bounds grows. Same shape as the 120 s timeout that broke when the token
+ceiling doubled.
+
+### Two opcode errors, needing opposite answers
+
+With the grammar rule in place, the small model's next failure was a different
+shape entirely:
+
+```
+syntax error, Unable to find opcode entry for 'diskgrain'
+```
+
+Not "unable to find opcode with NAME" — `diskgrain` exists, which is why the
+surprise action offered it at all. "Unable to find opcode ENTRY" is Csound saying
+the name is real but no overload accepts those argument types. Nearest-name
+suggestions are worthless here; the actual signature is the whole answer, and it was
+already in the index. `enrichError` now handles both errors, differently.
+
+**And the compact signature format caused the failure.** The model had been given
+`diskgrain: a <- Skkkiio` and wrote this comment above its attempt:
+
+> Grain Rate (a), Modulation Rate (k), Initial Grain Size/Offset (i), Sound File
+> Path (S), Pitch Shift/Position (x)
+
+It read the type letters as an ordered list of ROLES and invented a plausible
+meaning for each — then wrote the arguments in that invented order, putting the
+filename fourth when `S` is first. A notation that is unambiguous to someone who
+knows the convention was actively misleading to someone who doesn't.
+
+`describeSignature()` now spells signatures out positionally — numbered arguments,
+each type named in words — for both the surprise instruction and the repair pass.
+Same information, no room to reinterpret it.
+
+The recurring shape again: the reference was correct and unreadable. Correct and
+unreadable is a bug when the reader is the thing you are trying to ground.
+
 ### Raising the token ceiling broke the timeout
 
 First live attempt: the prompt "melody" against a local model reported *the model

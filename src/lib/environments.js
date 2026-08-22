@@ -283,10 +283,11 @@ const csound = {
   makeStarter: csoundStarter,
   makeRandom: csoundRandom,
 
-  // A Strudel answer is a line; a Csound answer is a whole orchestra, and the
-  // preamble asks the model to comment it generously. 2048 output tokens would
-  // truncate mid-instrument.
-  maxTokens: 4096,
+  // Reasoning models charge their chain of thought against this SAME allowance, so
+  // it has to cover thinking AND a whole orchestra. gemma-4-e4b spent 2048 tokens
+  // reasoning and returned an empty answer. The context here is 16k, so there is
+  // ample room; this ceiling exists to stop a repetition loop, not to be economical.
+  maxTokens: 6144,
 
   /**
    * An opcode this piece isn't using yet, for the “surprise me” action.

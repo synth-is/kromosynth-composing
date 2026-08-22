@@ -266,9 +266,25 @@ export default function CsoundSpike() {
     padRef.current?.play();
   };
 
+  /**
+   * Write out a committable opcode index so the app never builds one at runtime.
+   * This button is the only place the second wasm instance is meant to happen.
+   */
+  const exportIndex = () => run('Exporting the opcode index…', async () => {
+    const text = await opcodes.exportIndexModule();
+    const url = URL.createObjectURL(new Blob([text], { type: 'text/javascript' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'csoundOpcodeIndex.js';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  });
+
   /** Which of the hand-written surprise palette this build actually has. */
   const checkPalette = () => run('Checking the palette…', async () => {
-    const missing = await opcodes.missingFromPalette();
+    const report = await opcodes.paletteReport();
     const picks = [];
     const seen = [];
     for (let i = 0; i < 6; i++) {
@@ -277,7 +293,7 @@ export default function CsoundSpike() {
       seen.push(p.name);
       picks.push(p);
     }
-    setPalette({ missing, picks });
+    setPalette({ ...report, picks });
   });
 
   const log = cs.getLog();
@@ -379,6 +395,9 @@ export default function CsoundSpike() {
           <button className="btn tiny" onClick={buildOpcodeIndex} disabled={!!busy || !!ops}>
             {ops ? `${ops.names.length} opcodes ✓` : 'Build index'}
           </button>
+          <button className="btn tiny ghost" onClick={exportIndex} disabled={!!busy} title="Download csoundOpcodeIndex.js to commit into src/lib/">
+            Export index
+          </button>
         </div>
 
         {ops && (
@@ -467,11 +486,19 @@ export default function CsoundSpike() {
         </div>
         {palette && (
           <div style={{ fontSize: 12, lineHeight: 1.6 }}>
-            <div className="muted small" style={{ marginBottom: 6 }}>
-              {palette.missing.length === 0
-                ? 'Every entry exists in this build.'
-                : `Not in this build (${palette.missing.length}) — prune these from csoundPalette.js: ${palette.missing.join(', ')}`}
+            <div className="muted small" style={{ marginBottom: 4 }}>
+              {palette.usable.length} usable.
             </div>
+            {palette.missing.length > 0 && (
+              <div className="muted small" style={{ marginBottom: 4 }}>
+                Not in this build ({palette.missing.length}) — prune from csoundPalette.js: {palette.missing.join(', ')}
+              </div>
+            )}
+            {palette.tooDeep.length > 0 && (
+              <div className="muted small" style={{ marginBottom: 6 }}>
+                Too many required arguments for a small model, so never drawn ({palette.tooDeep.length}): {palette.tooDeep.join(', ')}
+              </div>
+            )}
             <div className="muted small">Sample draws:</div>
             {palette.picks.map((p) => (
               <div key={p.name}><code>{p.name}</code> <span className="muted">— {p.blurb}</span></div>

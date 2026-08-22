@@ -720,21 +720,6 @@ export default function App() {
   };
 
   /**
-   * The source line an error points at, for the repair prompt.
-   *
-   * Csound reports `… line 17, columns 22,25`, and a model given only that has to
-   * re-derive which line it wrote. Showing it the line closes the loop, and it
-   * costs nothing — we already have both halves. No-op for languages whose errors
-   * carry no line number, so Strudel is unaffected.
-   */
-  const quoteFailingLine = (code, error) => {
-    const m = /\bline (\d+)/i.exec(error || '');
-    if (!m) return '';
-    const line = String(code || '').split('\n')[Number(m[1]) - 1];
-    return line ? `\n\nLine ${m[1]}, which you wrote, reads:\n${line}\n` : '';
-  };
-
-  /**
    * Show a ticking elapsed count while the model works.
    *
    * A Csound answer is a whole commented orchestra, which on a local model can take
@@ -764,11 +749,25 @@ export default function App() {
     if (!out) { setAiStatus({ kind: 'error', text: 'The model returned no code.' }); return null; }
     setAiStatus({ kind: 'info', text: 'Checking it runs…' });
     let check = await padRef.current?.validate?.(out);
+
+    // Some failures are mechanical, and fixing them ourselves saves a whole
+    // generation — which on a local model is a minute or more, sometimes past the
+    // timeout, losing the edit entirely over one stray character.
+    if (check && !check.ok && padRef.current?.autoFix) {
+      const patched = padRef.current.autoFix(out, check.error);
+      if (patched) {
+        setAiStatus({ kind: 'info', text: 'Fixing a syntax slip…' });
+        const recheck = await padRef.current?.validate?.(patched);
+        if (recheck?.ok) { out = patched; check = recheck; }
+      }
+    }
+
     if (check && !check.ok) {
       stopTick = startElapsed(`Didn't run (${briefErr(check.error)}) — asking for a fix…`);
+      // The error already carries the offending line and, where we have it, the
+      // real signature — see CsoundPad's enrichError.
       const repair = `${instruction}\n\nYour previous attempt did not run. Error:\n${check.error}`
-        + quoteFailingLine(out, check.error)
-        + `\nReturn corrected code that runs in this version of ${env.label}, using only functions that exist, with the right number of arguments in the right order. Output only code.`;
+        + `\n\nReturn corrected code that runs in this version of ${env.label}, using only functions that exist, with the right number of arguments in the right order. Output only code.`;
       let fixed = '';
       try {
         fixed = ((await llm.askEdit({ instruction: repair, code, selection, kit, env, endpoint: aiEndpoint })).code || '').trim();
@@ -830,6 +829,11 @@ export default function App() {
     setAiBusy(true);
     try {
       const code = padRef.current?.getCode?.() ?? '';
+      // Stop first. Looking an opcode up may still need to stand up a second Csound
+      // wasm runtime (when no prebuilt index has been committed), and doing that
+      // while the engine is performing has killed the tab. The surprise replaces
+      // the buffer and replays at the end anyway.
+      try { padRef.current?.stop?.(); } catch { /* ignore */ }
       setAiStatus({ kind: 'info', text: 'Looking for something you haven’t used…' });
       const pick = await env.pickSurprise({ code, avoid: surprisedWithRef.current });
       if (!pick) {
@@ -842,6 +846,7 @@ export default function App() {
       // or ten arguments, and without it a small model guesses the arity.
       const sig = pick.signature
         ? `\n\nIts signature in this build is:\n${pick.signature}\n${pick.legend || ''}`
+          + `\nUse it to get the call right — do NOT copy it into a comment.`
         : '';
       const instruction = `Bring the opcode ${pick.name} into this piece — it ${pick.blurb}.${sig}\n\n`
         + `Build on what is already here rather than starting over, and keep the existing material recognisable. `

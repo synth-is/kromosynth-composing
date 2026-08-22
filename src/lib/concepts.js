@@ -1288,7 +1288,8 @@ const CSOUND_PREAMBLE = `Csound 7 (WebAssembly build). Essentials:
 - \`schedule instr, whenFromNow, duration, p4...\` fires an event from code. Its start time is relative to NOW, so an instrument that schedules ITSELF one bar ahead is how you loop. A score on its own ends.
 - Kit sounds are files in Csound's virtual filesystem, played with \`diskin2 "<path>", rate\`. They are MONO, so diskin2 takes ONE output. The available paths are listed under the prompt.
 - Every kit sound is peak-normalised. Scale down when layering (e.g. * 0.35) or you will exceed 0dbfs and Csound will report samples out of range.
-- COMMENT THE CODE YOU WRITE, generously: say what each line does and which number to change to hear something different. The person reading it is learning Csound from your output.`;
+- COMMENT THE CODE YOU WRITE, but BRIEFLY: at most one short line per statement, saying what it does and which number to change to hear something different. NEVER restate an opcode's argument list or signature as a comment — use a signature to get the call right, then say what the line achieves musically. Long comment blocks crowd out the code and get your answer cut off before it is finished.
+- Output the whole program and nothing else: no preamble, no explanation outside comments.`;
 
 // Core syntax the palette has no single concept for — hand-written, brief.
 const STRUDEL_PREAMBLE = `Strudel is a JavaScript live-coding language (TidalCycles in the browser). Essentials:
@@ -1319,7 +1320,29 @@ const PREAMBLES = { strudel: STRUDEL_PREAMBLE, csound: CSOUND_PREAMBLE };
 const VERSIONS = { strudel: STRUDEL_REFERENCE_VERSION, csound: CSOUND_REFERENCE_VERSION };
 const LANG_LABELS = { strudel: 'Strudel', csound: 'Csound' };
 
-export function buildReference(envId = 'strudel', kit = []) {
+/**
+ * An example squeezed down to what a prompt actually needs.
+ *
+ * Strudel examples are one-liners, so `buildReference` inlined them whole. Csound
+ * examples are COMPLETE ORCHESTRAS — header, instrument, comments, score — and with
+ * forty concepts that turned the system prompt into many thousands of tokens. A
+ * small local model then has no context left to answer in, and its reply arrives
+ * truncated mid-line, which Csound reports as "unexpected end of file".
+ *
+ * The information a reference needs is which opcodes a technique uses and roughly
+ * how they go together. Boilerplate, comments and score lines carry none of that,
+ * so they go.
+ */
+const BOILERPLATE = /^(ksmps|nchnls|0dbfs|instr\b|endin\b|<\/?Cs\w*>|[if]\s|;)/;
+
+function compactExample(src) {
+  const lines = String(src).split('\n').map((l) => l.trim()).filter(Boolean);
+  if (lines.length <= 1) return lines[0] || '';
+  const meat = lines.filter((l) => !BOILERPLATE.test(l));
+  return meat.slice(0, 3).join(' / ');
+}
+
+export function buildReference(envId = 'strudel', kit = [], { maxChars = 6000 } = {}) {
   // No concept library means no grounding. Returning a half-empty reference would
   // invite the model to fall back on whatever it remembers, which for Csound means
   // 6.x idioms this build rejects. Callers check hasConcepts() and don't ask.
@@ -1328,22 +1351,50 @@ export function buildReference(envId = 'strudel', kit = []) {
   const preamble = PREAMBLES[envId] || '';
   const version = VERSIONS[envId] || '';
   const label = LANG_LABELS[envId] || envId;
-  const lines = [];
-  for (const group of conceptsByCategory(envId)) {
-    lines.push(`\n## ${group.category}`);
-    for (const c of group.items) {
-      const ex = c.example ? ` — e.g. \`${c.example(names).replace(/\n/g, ' ')}\`` : '';
-      lines.push(`- ${c.label}: ${c.explain}${ex}`);
+
+  // Rendered up to three times. A reference that doesn't fit leaves the model no
+  // room to answer in, and that surfaces as a reply cut off mid-line. So it sheds
+  // detail in order of expendability: examples first (the preamble already carries
+  // the grammar), then the explanations, keeping the technique NAMES longest —
+  // knowing what exists is the part a model cannot reconstruct for itself.
+  const render = ({ examples = true, explain = true } = {}) => {
+    const lines = [];
+    for (const group of conceptsByCategory(envId)) {
+      lines.push(`\n## ${group.category}`);
+      for (const c of group.items) {
+        const compact = examples && c.example ? compactExample(c.example(names)) : '';
+        const ex = compact ? ` — e.g. \`${compact}\`` : '';
+        lines.push(explain ? `- ${c.label}: ${c.explain}${ex}` : `- ${c.label}`);
+      }
+    }
+    const idioms = envId === 'strudel' && STRUDEL_IDIOMS.length
+      ? '\n\n## Idioms (prefer these; do not invent functions):\n- ' + STRUDEL_IDIOMS.join('\n- ')
+      : '';
+    return [
+      preamble,
+      version ? `\nThis targets ${label} ~${version}; only use functions available in that version.` : '',
+      '\nAvailable techniques (label: what it does — example):',
+      lines.join('\n'),
+      idioms,
+    ].filter(Boolean).join('\n');
+  };
+
+  const tiers = [
+    ['full', render()],
+    ['without examples', render({ examples: false })],
+    ['names only', render({ examples: false, explain: false })],
+  ];
+  for (const [name, text] of tiers) {
+    if (text.length <= maxChars) {
+      if (name !== 'full') {
+        console.warn(`[concepts] reference for ${envId} rendered "${name}" `
+          + `(${text.length} chars, budget ${maxChars}) so the model has room to answer.`);
+      }
+      return text;
     }
   }
-  const idioms = envId === 'strudel' && STRUDEL_IDIOMS.length
-    ? '\n\n## Idioms (prefer these; do not invent functions):\n- ' + STRUDEL_IDIOMS.join('\n- ')
-    : '';
-  return [
-    preamble,
-    version ? `\nThis targets ${label} ~${version}; only use functions available in that version.` : '',
-    '\nAvailable techniques (label: what it does — example):',
-    lines.join('\n'),
-    idioms,
-  ].filter(Boolean).join('\n');
+  const last = tiers[tiers.length - 1][1];
+  console.warn(`[concepts] reference for ${envId} is ${last.length} chars even at its smallest, `
+    + `over the ${maxChars} budget. The preamble alone may be too long for this model.`);
+  return last;
 }
