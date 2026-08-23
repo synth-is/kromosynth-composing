@@ -11,6 +11,8 @@
  * without reproducing their prose. `docsUrl` links out for the real thing.
  */
 
+import { kitFilePath } from './csoundPaths.js';
+
 // Strudel concepts. `quick: true` marks the highest-value select-transforms that
 // surface directly in the selection bar; the palette shows everything.
 export const STRUDEL_CONCEPTS = [
@@ -409,10 +411,816 @@ export const STRUDEL_CONCEPTS = [
   },
 ];
 
-const REGISTRY = { strudel: STRUDEL_CONCEPTS };
+// Csound concepts. Unlike Strudel's one-liners, every example here is a COMPLETE
+// playable buffer — orchestra plus score — because that is what "Insert" replaces
+// and what the pad plays. Each one comments itself: docs/CSOUND_PLAN.md §12,
+// "generated code carries its own teaching".
+//
+// EVERY example is checked against the bundled build by the spike's "Validate all
+// concepts" button before it ships. Nothing in here is written from memory and
+// left unverified — a wrong example in a learning tool is worse than a missing one,
+// because the reader can't tell our mistake from theirs.
+const CS_HEADER = 'ksmps = 32\nnchnls = 2\n0dbfs = 1';
+
+/** Assemble a complete buffer: header + orchestra + score. */
+function csBuf(orc, sco) {
+  return `${CS_HEADER}\n\n${orc}\n\n<CsScore>\n${sco}\n</CsScore>`;
+}
+
+export const CSOUND_CONCEPTS = [
+  // ---- Instrument basics ----
+  {
+    id: 'cs-instr', category: 'Instrument basics', label: 'An instrument',
+    explain: 'Everything between instr and endin is one instrument. The score decides when it runs.',
+    example: () => csBuf(
+`; An instrument is a recipe for a sound. It makes no noise on its own —
+; something has to ask for it, which is what the score below does.
+instr 1
+  ; poscil is a pure tone: amplitude, then frequency in Hz.
+  aSig poscil 0.2, 220
+  ; out sends audio to the speakers, one argument per channel.
+  out aSig, aSig
+endin`,
+`; i <instrument> <start> <duration>
+i 1 0 2`),
+    match: /\binstr\b[\s\S]*\bendin\b/,
+  },
+  {
+    id: 'cs-rates', category: 'Instrument basics', label: 'a, k and i — the three rates',
+    explain: 'A name\u2019s first letter says how often it changes: a every sample, k every few hundred, i once.',
+    example: () => csBuf(
+`instr 1
+  ; iFreq is set ONCE when the note starts and never changes.
+  iFreq = 220
+  ; kSweep changes at control rate — often enough to hear as movement,
+  ; cheap enough to be free. line: from, over how long, to.
+  kSweep line 1, p3, 4
+  ; aSig changes every single sample: it IS the sound.
+  aSig poscil 0.15, iFreq * kSweep
+  out aSig, aSig
+endin`,
+`i 1 0 3`),
+    match: /\bk[A-Z]\w*\s+(line|linseg|expseg)\b/,
+  },
+  {
+    id: 'cs-pfields', category: 'Instrument basics', label: 'p-fields — values from the score',
+    explain: 'Each number on a score line arrives in the instrument as p1, p2, p3… so one instrument can play many ways.',
+    example: () => csBuf(
+`instr 1
+  ; p1 is the instrument, p2 the start, p3 the duration — always.
+  ; p4 onward are yours to name and use. Here p4 is a frequency.
+  aSig poscil 0.15, p4
+  out aSig, aSig
+endin`,
+`; Same instrument, three different notes — only p4 changes.
+i 1 0.0 0.5 220
+i 1 0.5 0.5 330
+i 1 1.0 1.0 440`),
+    match: /\bp[4-9]\b/,
+  },
+  {
+    id: 'cs-envelope', category: 'Instrument basics', label: 'Give it a shape (linen)',
+    explain: 'A raw tone clicks at both ends. An envelope fades it in and out.',
+    example: () => csBuf(
+`instr 1
+  ; linen: peak level, attack time, total length, release time.
+  ; Passing p3 as the length makes it fit whatever the score asks for.
+  ; Try 0.5 for the attack — it turns a hit into a swell.
+  aEnv linen 0.2, 0.01, p3, 0.3
+  aSig poscil aEnv, 220
+  out aSig, aSig
+endin`,
+`i 1 0 2`),
+    match: /\blinen\b/,
+  },
+  {
+    id: 'cs-schedule', category: 'Instrument basics', label: 'Fire events from code',
+    explain: 'schedule books a note from inside an instrument — the start time counts from now, not from the beginning.',
+    example: () => csBuf(
+`instr 1
+  aEnv linen 0.15, 0.005, p3, 0.05
+  aSig poscil aEnv, p4
+  out aSig, aSig
+endin
+
+; instr 99 makes no sound. Its body runs ONCE, the moment it starts, and
+; each schedule books an event that many seconds FROM NOW.
+instr 99
+  ;        instrument, when, how long, p4
+  schedule 1, 0.0, 0.4, 220
+  schedule 1, 0.5, 0.4, 330
+  schedule 1, 1.0, 0.4, 440
+endin`,
+`; The score only has to start the one instrument that writes the rest.
+i 99 0 0.1`),
+    match: /\bschedule\b/,
+  },
+
+  {
+    id: 'cs-two-forms', category: 'Instrument basics', label: 'Two ways to write a line',
+    explain: 'An opcode call has no equals sign; an equals sign is for arithmetic. Mixing them up is the mistake everyone makes first.',
+    example: () => csBuf(
+`instr 1
+  ; FORM 1 — an opcode call. Outputs on the left, then the opcode name, then its
+  ; arguments separated by commas. There is NO equals sign.
+  aTone poscil 0.2, 220
+
+  ; Some opcodes hand back more than one thing. Still no equals sign.
+  aL, aR pan2 aTone, 0.3
+
+  ; FORM 2 — an assignment. The equals sign is for arithmetic on values you
+  ; already have.
+  aQuiet = aL * 0.5
+
+  ; An opcode with ONE output can also be written like a function, and then it
+  ; does follow an equals sign — because the call is now an expression.
+  aFiltered = moogladder(aQuiet, 900, 0.3)
+
+  ; What never works is mixing them: \`aOut = poscil 0.2, 220\` is a syntax error.
+  out aFiltered, aFiltered
+endin`,
+`i 1 0 2`),
+    match: /=\s*[a-z]\w*\s*\(/i,
+  },
+
+  // ---- Playing your kit ----
+  {
+    id: 'cs-diskin', category: 'Playing your kit', label: 'Play one of your sounds',
+    explain: 'diskin2 reads a soundfile by name from Csound\u2019s filesystem. Your kit lives there.',
+    example: (n) => csBuf(
+`instr 1
+  ; The path is the kit name — the file was written in when you added the sound.
+  ; The second argument is the playback rate: 1 = exactly as recorded.
+  ; Kit sounds are MONO, so diskin2 has one output here.
+  aSig diskin2 "${kitFilePath(n.a)}", 1
+  aEnv linen 0.4, 0.005, p3, 0.05
+  out aSig * aEnv, aSig * aEnv
+endin`,
+`i 1 0 2`),
+    match: /\bdiskin2\b/,
+  },
+  {
+    id: 'cs-rate', category: 'Playing your kit', label: 'Change the pitch and speed',
+    explain: 'The playback rate transposes and stretches together, the way a tape machine does.',
+    example: (n) => csBuf(
+`instr 1
+  ; p4 is the rate. 2 reads through the file twice as fast, an octave up.
+  ; 0.5 is an octave down. Negative values read it BACKWARDS.
+  ; How long the note lasts is p3 — the rate only changes how much of the
+  ; file you get through in that time.
+  aSig diskin2 "${kitFilePath(n.a)}", p4
+  aEnv linen 0.4, 0.005, p3, 0.05
+  out aSig * aEnv, aSig * aEnv
+endin`,
+`i 1 0.0 0.6 1
+i 1 0.6 0.6 0.5
+i 1 1.2 0.6 1.5
+i 1 1.8 0.6 2`),
+  },
+  {
+    id: 'cs-skip', category: 'Playing your kit', label: 'Start part-way in',
+    explain: 'Skip into the file to grab the interesting bit instead of the attack.',
+    example: (n) => csBuf(
+`instr 1
+  ; Third argument: how many seconds to skip before playing.
+  ; p4 carries it from the score so you can hunt for the good part.
+  aSig diskin2 "${kitFilePath(n.a)}", 1, p4
+  aEnv linen 0.4, 0.02, p3, 0.1
+  out aSig * aEnv, aSig * aEnv
+endin`,
+`; Same sound, four different starting points.
+i 1 0.0 0.5 0.0
+i 1 0.5 0.5 0.5
+i 1 1.0 0.5 1.0
+i 1 1.5 0.5 1.5`),
+  },
+  {
+    id: 'cs-layer', category: 'Playing your kit', label: 'Two sounds at once',
+    explain: 'Adding signals means adding levels too — every kit sound is normalised, so scale down or you clip.',
+    example: (n) => csBuf(
+`instr 1
+  aOne diskin2 "${kitFilePath(n.a)}", 1
+  aTwo diskin2 "${kitFilePath(n.b)}", 1
+  ; Both files peak near full scale. Summed they would reach 2.0, and
+  ; 0dbfs is 1.0 — hence the 0.35. Csound prints "samples out of range"
+  ; in the log if you get this wrong.
+  aMix = (aOne + aTwo) * 0.35
+  aEnv linen 1, 0.01, p3, 0.1
+  out aMix * aEnv, aMix * aEnv
+endin`,
+`i 1 0 3`),
+  },
+  {
+    id: 'cs-perinstr', category: 'Playing your kit', label: 'One instrument per sound',
+    explain: 'Give each kit sound its own instrument number, then the score reads like a drum pattern.',
+    example: (n) => csBuf(
+`instr 1
+  aSig diskin2 "${kitFilePath(n.a)}", p4
+  aEnv linen 0.3, 0.005, p3, 0.05
+  out aSig * aEnv, aSig * aEnv
+endin
+
+instr 2
+  aSig diskin2 "${kitFilePath(n.b)}", p4
+  aEnv linen 0.3, 0.005, p3, 0.05
+  out aSig * aEnv, aSig * aEnv
+endin`,
+`; Two lanes. Read the first column downward and it is a rhythm.
+i 1 0.0 0.3 1
+i 2 0.3 0.3 1
+i 1 0.6 0.3 1
+i 2 0.9 0.3 1.5
+i 1 1.2 0.3 1
+i 2 1.5 0.3 0.75`),
+  },
+  {
+    id: 'cs-loop', category: 'Playing your kit', label: 'Make it repeat',
+    explain: 'A score ends. To keep going, an instrument books itself again one bar ahead.',
+    example: (n) => csBuf(
+`instr 1
+  aSig diskin2 "${kitFilePath(n.a)}", p4
+  aEnv linen 0.3, 0.005, p3, 0.05
+  out aSig * aEnv, aSig * aEnv
+endin
+
+; This is the whole trick. instr 99 lays out one bar, and its last line
+; books ANOTHER COPY OF ITSELF one bar ahead. That copy does the same.
+; Delete that line and the bar plays once and stops — both are valid.
+instr 99
+  schedule 1, 0.0, 0.4, 1
+  schedule 1, 0.4, 0.4, 1.5
+  schedule 1, 0.8, 0.4, 2
+  schedule 99, 1.2, 0.1
+endin`,
+`i 99 0 0.1`),
+  },
+
+  // ---- Filters ----
+  {
+    id: 'cs-moogladder', category: 'Filters', label: 'Low-pass with resonance',
+    explain: 'Remove the top of a sound and emphasise what\u2019s left at the cutoff. The classic synth filter.',
+    example: (n) => csBuf(
+`instr 1
+  aSig diskin2 "${kitFilePath(n.a)}", 1
+  aEnv linen 0.5, 0.005, p3, 0.05
+  ; moogladder: signal, cutoff in Hz, resonance 0–1.
+  ; Push resonance past 0.8 and the filter starts to whistle at the cutoff.
+  aOut moogladder aSig * aEnv, p4, 0.4
+  out aOut, aOut
+endin`,
+`; Same sound, four cutoffs — hear the top disappear.
+i 1 0.0 0.6 6000
+i 1 0.6 0.6 2000
+i 1 1.2 0.6 700
+i 1 1.8 0.6 250`),
+    match: /\bmoogladder\b/,
+  },
+  {
+    id: 'cs-sweep', category: 'Filters', label: 'Sweep the filter',
+    explain: 'Move the cutoff while the note plays and a static sound becomes a gesture.',
+    example: (n) => csBuf(
+`instr 1
+  aSig diskin2 "${kitFilePath(n.a)}", 1
+  aEnv linen 0.5, 0.01, p3, 0.1
+  ; expseg moves in exponential steps, which is how we hear pitch and
+  ; brightness — a linear sweep sounds lopsided. from, over, to.
+  kCut expseg 300, p3 * 0.7, 5000, p3 * 0.3, 400
+  aOut moogladder aSig * aEnv, kCut, 0.5
+  out aOut, aOut
+endin`,
+`i 1 0 4`),
+    match: /\bexpseg\b/,
+  },
+  {
+    id: 'cs-reson', category: 'Filters', label: 'Band-pass — pick out one region',
+    explain: 'Keep a narrow band and throw the rest away. Narrow enough and it rings at that pitch.',
+    example: (n) => csBuf(
+`instr 1
+  aSig diskin2 "${kitFilePath(n.a)}", 1
+  aEnv linen 0.5, 0.005, p3, 0.05
+  ; reson: signal, centre frequency, bandwidth, scaling mode.
+  ; Mode 1 keeps the level sane; without it a narrow band gets very loud.
+  ; p5 is the bandwidth — try 20 for a ringing tone, 800 for a colour.
+  aOut reson aSig * aEnv, p4, p5, 1
+  out aOut, aOut
+endin`,
+`i 1 0.0 0.8 400 600
+i 1 0.8 0.8 400 40
+i 1 1.6 0.8 1600 40`),
+    match: /\breson\b/,
+  },
+
+  // ---- Effects ----
+  {
+    id: 'cs-reverb', category: 'Effects', label: 'Reverb',
+    explain: 'Put the sound in a room. Keep a dry copy and mix the wet one under it.',
+    example: (n) => csBuf(
+`instr 1
+  aSig diskin2 "${kitFilePath(n.a)}", 1
+  aEnv linen 0.4, 0.005, p3, 0.05
+  aDry = aSig * aEnv
+  ; reverbsc takes a stereo pair in and gives a stereo pair out.
+  ; Third argument is feedback — room size, really. 0.9 is a big hall.
+  ; Fourth is a cutoff: lower it and the tail gets darker.
+  aWetL, aWetR reverbsc aDry, aDry, 0.85, 8000
+  ; p3 is long so the tail has room to decay before the note ends.
+  out aDry * 0.7 + aWetL * 0.4, aDry * 0.7 + aWetR * 0.4
+endin`,
+`i 1 0 6`),
+    match: /\breverbsc\b/,
+  },
+  {
+    id: 'cs-delay', category: 'Effects', label: 'Echo',
+    explain: 'Delayed copies underneath the original. You only hear them as echoes if the source stops — so keep it short.',
+    example: (n) => csBuf(
+`instr 1
+  aSig diskin2 "${kitFilePath(n.a)}", 1
+  ; A short blip, not the whole sound. Most kit sounds are sustained
+  ; textures, and an echo hidden under a texture just thickens it — you
+  ; need silence after the source to hear the repeats at all.
+  ; linseg: start, time, value, time, value… and it holds the last one.
+  aEnv linseg 0, 0.005, 0.5, 0.25, 0
+  aDry = aSig * aEnv
+  ; vdelay: signal, delay in MILLISECONDS, maximum delay to reserve.
+  ; Three taps, each later and quieter — that decay is what makes it
+  ; sound like a room rather than three separate copies.
+  aE1 vdelay aDry, 300, 1200
+  aE2 vdelay aDry, 600, 1200
+  aE3 vdelay aDry, 900, 1200
+  aMix = aDry + aE1 * 0.6 + aE2 * 0.36 + aE3 * 0.2
+  out aMix, aMix
+endin`,
+`; The note lasts 2 s so the last tap has room to sound.
+i 1 0 2`),
+    match: /\bvdelay\b/,
+  },
+  {
+    id: 'cs-pan', category: 'Effects', label: 'Place it in the stereo field',
+    explain: 'pan2 turns one signal into a stereo pair. Move the position and the sound travels.',
+    example: (n) => csBuf(
+`instr 1
+  aSig diskin2 "${kitFilePath(n.a)}", 1
+  aEnv linen 0.4, 0.005, p3, 0.05
+  ; kPos runs 0 (hard left) to 1 (hard right) across the note.
+  kPos line 0, p3, 1
+  aL, aR pan2 aSig * aEnv, kPos
+  out aL, aR
+endin`,
+`i 1 0 3`),
+    match: /\bpan2\b/,
+  },
+
+  // ---- Movement ----
+  {
+    id: 'cs-lfo', category: 'Movement', label: 'Wobble it (LFO)',
+    explain: 'A slow oscillator used as a control value rather than as sound.',
+    example: (n) => csBuf(
+`instr 1
+  aSig diskin2 "${kitFilePath(n.a)}", 1
+  ; A k-rate poscil below ~20 Hz is an LFO — too slow to hear as a pitch,
+  ; fast enough to hear as movement. It swings between -0.3 and +0.3,
+  ; so adding 0.7 keeps the level positive: 0.4 to 1.0.
+  kWob poscil 0.3, 5
+  aEnv linen 0.4, 0.01, p3, 0.1
+  aOut = aSig * aEnv * (0.7 + kWob)
+  out aOut, aOut
+endin`,
+`i 1 0 3`),
+  },
+  {
+    id: 'cs-random', category: 'Movement', label: 'Random drift',
+    explain: 'Wander a parameter between two values instead of choosing one. Organic rather than mechanical.',
+    example: (n) => csBuf(
+`instr 1
+  ; randomi picks new random values and glides between them:
+  ; minimum, maximum, times per second.
+  ; Each note lands somewhere different — play it a few times.
+  kCut randomi 400, 4000, 3
+  aSig diskin2 "${kitFilePath(n.a)}", 1
+  aEnv linen 0.4, 0.005, p3, 0.05
+  aOut moogladder aSig * aEnv, kCut, 0.3
+  out aOut, aOut
+endin`,
+`i 1 0.0 0.8 1
+i 1 0.8 0.8 1
+i 1 1.6 0.8 1`),
+    match: /\brandomi\b/,
+  },
+  {
+    id: 'cs-linseg', category: 'Movement', label: 'Envelopes with more than one stage',
+    explain: 'linen gives you in and out. linseg lets you draw any shape in as many steps as you like.',
+    example: (n) => csBuf(
+`instr 1
+  aSig diskin2 "${kitFilePath(n.a)}", 1
+  ; linseg: start value, time, next value, time, next value…
+  ; This is a fast attack, a drop to a quiet sustain, then a slow fade —
+  ; the shape of a plucked string. Add another pair to add a stage.
+  aEnv linseg 0, 0.01, 0.5, 0.1, 0.15, p3 - 0.11, 0
+  out aSig * aEnv, aSig * aEnv
+endin`,
+`i 1 0 3`),
+    match: /\blinseg\b/,
+  },
+
+  // ---- Function tables (unlocks loscil, flooper2, mincer, granular…) ----
+  {
+    id: 'cs-ftgen', category: 'Function tables', label: 'Load a sound into a table',
+    explain: 'A table is a sound held in memory rather than read off disk — which unlocks looping, granular and phase-vocoder opcodes.',
+    example: (n) => csBuf(
+`; A function table is a block of memory Csound reads from. GEN01 fills one
+; from a soundfile. The 0 for size means "as long as the file is".
+; This line lives OUTSIDE any instrument — it runs once, at load.
+giSnd ftgen 0, 0, 0, 1, "${kitFilePath(n.a)}", 0, 0, 0
+
+instr 1
+  ; loscil reads the table instead of the file: amplitude, pitch ratio,
+  ; table, and the base frequency the table is assumed to be at.
+  aSig loscil 0.4, p4, giSnd, 1
+  aEnv linen 1, 0.005, p3, 0.05
+  out aSig * aEnv, aSig * aEnv
+endin`,
+`i 1 0.0 0.6 1
+i 1 0.6 0.6 1.5
+i 1 1.2 0.6 0.75`),
+    match: /\bftgen\b/,
+  },
+  {
+    id: 'cs-flooper', category: 'Function tables', label: 'Loop a slice of it',
+    explain: 'Pick a start and end inside the sound and loop between them, crossfading so the seam doesn\u2019t click.',
+    example: (n) => csBuf(
+`giSnd ftgen 0, 0, 0, 1, "${kitFilePath(n.a)}", 0, 0, 0
+
+instr 1
+  ; flooper2: amplitude, pitch, loop start (s), loop end (s),
+  ; crossfade (s), table.
+  ; Move the start and end and you are sampling a texture out of your sound.
+  aSig flooper2 0.4, p4, 0.2, 1.2, 0.05, giSnd
+  aEnv linen 1, 0.05, p3, 0.2
+  out aSig * aEnv, aSig * aEnv
+endin`,
+`i 1 0 4 1`),
+    match: /\bflooper2\b/,
+  },
+  {
+    id: 'cs-mincer', category: 'Function tables', label: 'Stretch time without changing pitch',
+    explain: 'A phase vocoder reads the sound at whatever speed you like while pitch stays put — or the other way round.',
+    example: (n) => csBuf(
+`giSnd ftgen 0, 0, 0, 1, "${kitFilePath(n.a)}", 0, 0, 0
+
+instr 1
+  ; aTime is a POINTER, in seconds, into the sound. Here it crawls across
+  ; the first two seconds over the whole note — so a 2 s sound takes p3.
+  ; Slow it further and you get a drone made of your own material.
+  aTime line 0, p3, 2
+  ; mincer: time pointer, amplitude, pitch, table, lock.
+  ; p4 is the pitch, INDEPENDENT of the speed above. That is the point.
+  aSig mincer aTime, 0.5, p4, giSnd, 1
+  aEnv linen 1, 0.05, p3, 0.2
+  out aSig * aEnv, aSig * aEnv
+endin`,
+`; Same speed, three pitches.
+i 1 0 6 1
+i 1 0 6 1.5
+i 1 0 6 0.5`),
+    match: /\bmincer\b/,
+  },
+
+  // ---- Oscillators ----
+  {
+    id: 'cs-vco2', category: 'Oscillators', label: 'Classic waveforms',
+    explain: 'vco2 makes saw, square and triangle without the harsh aliasing a naive oscillator gives.',
+    example: () => csBuf(
+`instr 1
+  ; vco2: amplitude, frequency. The default is a sawtooth — add a third
+  ; argument to pick another shape (try 10 for a square).
+  aSig vco2 0.15, p4
+  aEnv linen 1, 0.01, p3, 0.1
+  aOut moogladder aSig * aEnv, 1200, 0.3
+  out aOut, aOut
+endin`,
+`i 1 0.0 0.5 110
+i 1 0.5 0.5 165
+i 1 1.0 1.0 82.5`),
+    match: /\bvco2\b/,
+  },
+  {
+    id: 'cs-fm', category: 'Oscillators', label: 'FM from two oscillators',
+    explain: 'Use one oscillator to wobble another\u2019s frequency. Slow it and it\u2019s vibrato; speed it up and it becomes timbre.',
+    example: () => csBuf(
+`instr 1
+  ; p4 = pitch, p5 = how far the modulator pushes (the "index"),
+  ; p6 = the modulator's frequency as a ratio of the carrier's.
+  ; Whole-number ratios sound harmonic; 1.41 sounds like a bell.
+  aMod poscil p5, p4 * p6
+  aEnv linen 0.2, 0.01, p3, 0.3
+  aSig poscil aEnv, p4 + aMod
+  out aSig, aSig
+endin`,
+`;         pitch  index  ratio
+i 1 0.0 0.8 220 50    1
+i 1 0.8 0.8 220 300   1
+i 1 1.6 1.2 220 400   1.41`),
+  },
+  {
+    id: 'cs-noise', category: 'Oscillators', label: 'Noise, then carve it',
+    explain: 'Noise contains every frequency, so a narrow filter can pull any tone out of it.',
+    example: () => csBuf(
+`instr 1
+  ; noise: amplitude, and a colour control (0 = white).
+  aNz noise 0.4, 0
+  ; A narrow band-pass turns hiss into a pitched ring.
+  aOut reson aNz, p4, 30, 1
+  aEnv linen 1, 0.005, p3, 0.2
+  out aOut * aEnv, aOut * aEnv
+endin`,
+`i 1 0.0 0.4 400
+i 1 0.4 0.4 600
+i 1 0.8 0.8 900`),
+    match: /\bnoise\b/,
+  },
+
+  // ---- Chords and arrangement ----
+  {
+    id: 'cs-chord', category: 'Chords & arrangement', label: 'Play a chord',
+    explain: 'Several notes at the same start time. Naming them by MIDI number makes the intervals obvious.',
+    example: () => csBuf(
+`instr 1
+  ; cpsmidinn turns a MIDI note number into Hz. 60 is middle C,
+  ; and +12 is an octave — so the arithmetic stays musical.
+  aSig vco2 0.08, cpsmidinn(p4)
+  aEnv linen 1, 0.02, p3, 0.4
+  aOut moogladder aSig * aEnv, 1500, 0.2
+  out aOut, aOut
+endin
+
+instr 99
+  ; A minor triad: root, +3 semitones, +7.
+  schedule 1, 0, 2, 57
+  schedule 1, 0, 2, 60
+  schedule 1, 0, 2, 64
+  ; Change 60 to 61 and the chord turns major.
+endin`,
+`i 99 0 0.1`),
+    match: /\bcpsmidinn\b/,
+  },
+  {
+    id: 'cs-sections', category: 'Chords & arrangement', label: 'Bars that change',
+    explain: 'Let the clock count bars and decide what to play. This is where a loop becomes a piece.',
+    example: (n) => csBuf(
+`instr 1
+  aSig diskin2 "${kitFilePath(n.a)}", p4
+  aEnv linen 0.3, 0.005, p3, 0.05
+  out aSig * aEnv, aSig * aEnv
+endin
+
+instr 99
+  ; p4 is a bar counter. The clock passes p4 + 1 to its next copy,
+  ; so it knows how far into the piece it is.
+  iBar = p4
+  if iBar < 2 then
+    ; First two bars: sparse.
+    schedule 1, 0.0, 0.4, 1
+    schedule 1, 0.8, 0.4, 1
+  else
+    ; After that: busier, and rising.
+    schedule 1, 0.0, 0.4, 1
+    schedule 1, 0.4, 0.4, 1.5
+    schedule 1, 0.8, 0.4, 2
+    schedule 1, 1.2, 0.4, 3
+  endif
+  schedule 99, 1.6, 0.1, iBar + 1
+endin`,
+`; The last number is the starting bar.
+i 99 0 0.1 0`),
+    match: /\bif\b[\s\S]*\bendif\b/,
+  },
+  {
+    id: 'cs-send', category: 'Chords & arrangement', label: 'One reverb for everything',
+    explain: 'Instruments write into a shared bus; a single always-on instrument reverberates the lot. Cheaper and more coherent than one reverb each.',
+    example: (n) => csBuf(
+`; Global a-rate variables (ga…) are visible to every instrument — a bus.
+gaSendL init 0
+gaSendR init 0
+
+instr 1
+  aSig diskin2 "${kitFilePath(n.a)}", p4
+  aEnv linen 0.3, 0.005, p3, 0.05
+  aOut = aSig * aEnv
+  out aOut, aOut
+  ; Add to the bus rather than replacing it, or voices erase each other.
+  gaSendL = gaSendL + aOut * 0.4
+  gaSendR = gaSendR + aOut * 0.4
+endin
+
+; Instruments run in NUMBER ORDER each control cycle, so 100 sees everything
+; instrument 1 wrote this cycle. That is why the effect gets a high number.
+instr 100
+  aL, aR reverbsc gaSendL, gaSendR, 0.88, 7000
+  out aL * 0.6, aR * 0.6
+  ; Empty the bus, or it feeds back and grows forever.
+  gaSendL = 0
+  gaSendR = 0
+endin`,
+`; p3 of -1 means "hold until stopped" — the effect stays up the whole time.
+i 100 0 -1
+i 1 0.0 0.4 1
+i 1 0.6 0.4 1.5
+i 1 1.2 0.4 2`),
+    match: /\bga[A-Z]\w*/,
+  },
+
+  // ---- Spectral ----
+  {
+    id: 'cs-freeze', category: 'Spectral', label: 'Freeze the spectrum',
+    explain: 'Take the sound apart into frequencies, hold them still, and put it back together — a moment stretched indefinitely.',
+    example: (n) => csBuf(
+`instr 1
+  aSig diskin2 "${kitFilePath(n.a)}", 1
+  ; pvsanal turns audio into a stream of spectral frames (an "fsig").
+  ; FFT size, overlap, window size, window type. Bigger FFT = finer
+  ; frequency detail but smearier in time.
+  fSig pvsanal aSig, 1024, 256, 1024, 1
+  ; Above 0.5 these hold amplitude and frequency where they are. The ramp
+  ; means the sound gradually stops moving and becomes a chord.
+  kHold line 0, p3, 1
+  fHeld pvsfreeze fSig, kHold, kHold
+  ; pvsynth turns the frames back into audio.
+  aOut pvsynth fHeld
+  aEnv linen 0.6, 0.05, p3, 0.5
+  out aOut * aEnv, aOut * aEnv
+endin`,
+`i 1 0 6`),
+    match: /\bpvsanal\b/,
+  },
+
+  // ---- Live coding ----
+  {
+    id: 'cs-chn', category: 'Live coding', label: 'Control channels',
+    explain: 'A named channel any running instrument can read — the hook for knobs, or for one instrument to steer another.',
+    example: (n) => csBuf(
+`instr 1
+  ; chnget reads a named channel. Nothing is writing "cutoff" yet, so it
+  ; reads 0 — limit clamps that into something audible.
+  kCut chnget "cutoff"
+  kCut limit kCut, 300, 8000
+  aSig diskin2 "${kitFilePath(n.a)}", 1
+  aEnv linen 0.4, 0.005, p3, 0.05
+  aOut moogladder aSig * aEnv, kCut, 0.3
+  out aOut, aOut
+endin
+
+instr 2
+  ; …and chnset writes one. An instrument whose only job is to move a
+  ; number is a perfectly good instrument.
+  kSweep line 300, p3, 6000
+  chnset kSweep, "cutoff"
+endin`,
+`i 2 0 4
+i 1 0 4`),
+    match: /\bchn(get|set)\b/,
+  },
+
+  // ---- Granular ----
+  {
+    id: 'cs-syncgrain', category: 'Granular', label: 'Granular clouds',
+    explain: 'Chop the sound into hundreds of tiny grains and rebuild it. Density alone takes you from stutter to smooth texture.',
+    example: (n) => csBuf(
+`giSnd ftgen 0, 0, 0, 1, "${kitFilePath(n.a)}", 0, 0, 0
+; GEN20 makes a window shape — the little fade applied to each grain so the
+; edges don't click. 2 is a Hanning curve.
+giWin ftgen 0, 0, 16384, 20, 2, 1
+
+instr 1
+  ; syncgrain: amplitude, grains per second, pitch, grain size in seconds,
+  ; how fast the read point moves through the source, source table,
+  ; window table, and how many grains may overlap.
+  ; p4 is the density. Below ~20 you hear separate grains; above ~100 they
+  ; fuse into a continuous texture.
+  aSig syncgrain 0.4, p4, 1, 0.08, 0.25, giSnd, giWin, 20
+  aEnv linen 1, 0.1, p3, 0.5
+  out aSig * aEnv, aSig * aEnv
+endin`,
+`i 1 0.0 2 8
+i 1 2.0 2 40
+i 1 4.0 3 200`),
+    match: /\bsyncgrain\b/,
+  },
+  {
+    id: 'cs-freeze-grain', category: 'Granular', label: 'Freeze on one moment',
+    explain: 'Stop the read point and the grains keep coming from a single instant — a drone made of one slice of your sound.',
+    example: (n) => csBuf(
+`giSnd ftgen 0, 0, 0, 1, "${kitFilePath(n.a)}", 0, 0, 0
+giWin ftgen 0, 0, 16384, 20, 2, 1
+
+instr 1
+  ; The fifth argument is the read-point speed. 0 means it never moves:
+  ; every grain comes from the same place in the file, forever.
+  ; p4 is the grain size — small grains buzz, long ones sound like a pad.
+  ; p5 transposes without changing anything else.
+  aSig syncgrain 0.35, 80, p5, p4, 0, giSnd, giWin, 30
+  aEnv linen 1, 0.5, p3, 1
+  out aSig * aEnv, aSig * aEnv
+endin`,
+`;          grain  pitch
+i 1 0.0 4  0.02   1
+i 1 4.0 4  0.20   1
+i 1 8.0 4  0.20   1.5`),
+  },
+
+  // ---- Spectral ----
+  {
+    id: 'cs-pvscale', category: 'Spectral', label: 'Pitch-shift without time-shift',
+    explain: 'Move the frequencies and leave the timing alone — the opposite trade from playback rate.',
+    example: (n) => csBuf(
+`instr 1
+  aSig diskin2 "${kitFilePath(n.a)}", 1
+  fSig pvsanal aSig, 1024, 256, 1024, 1
+  ; pvscale multiplies every frequency by p4. 2 is an octave up, and
+  ; unlike changing the playback rate the sound still takes just as long.
+  fUp pvscale fSig, p4
+  aOut pvsynth fUp
+  aEnv linen 0.5, 0.02, p3, 0.1
+  out aOut * aEnv, aOut * aEnv
+endin`,
+`; Three transpositions, all the same length.
+i 1 0.0 2 1
+i 1 2.0 2 1.5
+i 1 4.0 2 0.5`),
+    match: /\bpvscale\b/,
+  },
+  {
+    id: 'cs-pvsblur', category: 'Spectral', label: 'Smear it in time',
+    explain: 'Average each frequency over a window of time. Transients dissolve and the sound turns to fog.',
+    example: (n) => csBuf(
+`instr 1
+  aSig diskin2 "${kitFilePath(n.a)}", 1
+  fSig pvsanal aSig, 1024, 256, 1024, 1
+  ; pvsblur: the stream, how many seconds to average over, and the most
+  ; it will ever need to store. Longer blur = less detail, more cloud.
+  fBlur pvsblur fSig, p4, 2
+  aOut pvsynth fBlur
+  aEnv linen 0.6, 0.05, p3, 0.2
+  out aOut * aEnv, aOut * aEnv
+endin`,
+`i 1 0.0 2 0.05
+i 1 2.0 2 0.4
+i 1 4.0 3 1.5`),
+    match: /\bpvsblur\b/,
+  },
+  {
+    id: 'cs-pvscross', category: 'Spectral', label: 'Morph one sound into another',
+    explain: 'Cross-synthesis: give one sound the spectral shape of another, and fade between them.',
+    example: (n) => csBuf(
+`instr 1
+  ; Two of your sounds, analysed into spectral streams.
+  aA diskin2 "${kitFilePath(n.a)}", 1
+  aB diskin2 "${kitFilePath(n.b)}", 1
+  fA pvsanal aA, 1024, 256, 1024, 1
+  fB pvsanal aB, 1024, 256, 1024, 1
+  ; kMix walks from one to the other across the note. pvscross takes the
+  ; two amplitude balances — so at the start you hear mostly A's shape,
+  ; at the end mostly B's, and in the middle something that is neither.
+  ; The middle is the interesting part. Try holding it at 0.5.
+  kMix line 0, p3, 1
+  fX pvscross fA, fB, 1 - kMix, kMix
+  aOut pvsynth fX
+  aEnv linen 0.6, 0.05, p3, 0.3
+  out aOut * aEnv, aOut * aEnv
+endin`,
+`i 1 0 6`),
+    match: /\bpvscross\b/,
+  },
+
+  // ---- Select-and-transform (no standalone example; they wrap a selection) ----
+  {
+    id: 'cs-lowpass', category: 'Shaping a signal', label: 'Low-pass filter', quick: true,
+    explain: 'Select an audio variable, then wrap it in a resonant low-pass. Arguments: cutoff Hz, resonance 0–1.',
+    apply: (s) => `moogladder(${s}, 800, 0.3)`,
+    match: /\bmoogladder\b/,
+  },
+  {
+    id: 'cs-quieter', category: 'Shaping a signal', label: 'Quieter', quick: true,
+    explain: 'Halve the level of the selected signal — the fix when Csound reports samples out of range.',
+    apply: (s) => `(${s} * 0.5)`,
+  },
+  {
+    id: 'cs-tremolo', category: 'Shaping a signal', label: 'Tremolo', quick: true,
+    explain: 'Multiply the selection by a wobbling level so it pulses 4 times a second.',
+    apply: (s) => `(${s} * (0.6 + poscil(0.4, 4)))`,
+  },
+];
+
+const REGISTRY = { strudel: STRUDEL_CONCEPTS, csound: CSOUND_CONCEPTS };
 
 export function getConcepts(envId = 'strudel') {
+  // `|| STRUDEL_CONCEPTS` only catches ids we don't know about; a registered but
+  // empty list ([]) is truthy and passes through as itself.
   return REGISTRY[envId] || STRUDEL_CONCEPTS;
+}
+
+/** Whether this environment has a concept library yet — gates the palette and the AI. */
+export function hasConcepts(envId = 'strudel') {
+  return getConcepts(envId).length > 0;
 }
 
 /** Kit sound names used to fill example snippets (with sensible placeholders). */
@@ -461,6 +1269,27 @@ export function explainConcepts(text, envId = 'strudel') {
  * Keep STRUDEL_REFERENCE_VERSION in sync with @strudel/repl in package.json.
  */
 export const STRUDEL_REFERENCE_VERSION = '1.3';
+// Keep in sync with @csound/browser in package.json (pinned exactly, on purpose).
+export const CSOUND_REFERENCE_VERSION = '7.0.0-beta33';
+
+// Core syntax the palette has no single concept for — hand-written, brief.
+// Csound's is longer than Strudel's because more of it is non-obvious AND because
+// most Csound material a model has seen is 6.x: `outs`, and opcodes this beta has
+// moved. Stating the version's rules explicitly is cheaper than repairing them.
+const CSOUND_PREAMBLE = `Csound 7 (WebAssembly build). Essentials:
+- An ORCHESTRA defines instruments (instr N ... endin); a SCORE says when they play. Both live in ONE buffer here: everything above a line containing only <CsScore> is the orchestra, everything below it is the score.
+- Do NOT write an \`sr\` line — the app sets the sample rate to match the browser. Start with: ksmps = 32 / nchnls = 2 / 0dbfs = 1.
+- Output with \`out aL, aR\`. \`outs\` is DEPRECATED in Csound 7 — never emit it.
+- A variable's first letter is its rate: a... = audio rate (the sound itself), k... = control rate (movement), i... = set once at note start, S... = string.
+- TWO STATEMENT FORMS, and confusing them is the most common Csound error. (1) An OPCODE CALL has NO equals sign: \`aOut opcodename arg1, arg2\` — outputs on the left, then the opcode name, then comma-separated arguments. Several outputs are fine: \`aL, aR pan2 aSig, 0.3\`. (2) An ASSIGNMENT uses \`=\` for arithmetic on values you already have: \`aMix = aOne * 0.5 + aTwo\`. A single-output opcode may also be written as a function, and only THEN does it follow an \`=\`: \`aOut = moogladder(aSig, 900, 0.3)\`. NEVER mix the two — \`aOut = poscil 0.2, 220\` and \`aLeft, aRight = lorenz 0.01, 0.01\` are both syntax errors.
+- One statement per line; there is no line-continuation character.
+- Supply the arguments an opcode actually takes, in order. Do not invent extra ones, and do not omit required ones to make a line look tidier.
+- p-fields come from the score line: p1 = instrument, p2 = start, p3 = duration, p4 onward are yours.
+- \`schedule instr, whenFromNow, duration, p4...\` fires an event from code. Its start time is relative to NOW, so an instrument that schedules ITSELF one bar ahead is how you loop. A score on its own ends.
+- Kit sounds are files in Csound's virtual filesystem, played with \`diskin2 "<path>", rate\`. They are MONO, so diskin2 takes ONE output. The available paths are listed under the prompt.
+- Every kit sound is peak-normalised. Scale down when layering (e.g. * 0.35) or you will exceed 0dbfs and Csound will report samples out of range.
+- COMMENT THE CODE YOU WRITE, but BRIEFLY: at most one short line per statement, saying what it does and which number to change to hear something different. NEVER restate an opcode's argument list or signature as a comment — use a signature to get the call right, then say what the line achieves musically. Long comment blocks crowd out the code and get your answer cut off before it is finished.
+- Output the whole program and nothing else: no preamble, no explanation outside comments.`;
 
 // Core syntax the palette has no single concept for — hand-written, brief.
 const STRUDEL_PREAMBLE = `Strudel is a JavaScript live-coding language (TidalCycles in the browser). Essentials:
@@ -487,26 +1316,85 @@ const STRUDEL_IDIOMS = [
  * @param {Array} kit  current kit entries (their names fill the examples)
  * @returns {string}
  */
-export function buildReference(envId = 'strudel', kit = []) {
+const PREAMBLES = { strudel: STRUDEL_PREAMBLE, csound: CSOUND_PREAMBLE };
+const VERSIONS = { strudel: STRUDEL_REFERENCE_VERSION, csound: CSOUND_REFERENCE_VERSION };
+const LANG_LABELS = { strudel: 'Strudel', csound: 'Csound' };
+
+/**
+ * An example squeezed down to what a prompt actually needs.
+ *
+ * Strudel examples are one-liners, so `buildReference` inlined them whole. Csound
+ * examples are COMPLETE ORCHESTRAS — header, instrument, comments, score — and with
+ * forty concepts that turned the system prompt into many thousands of tokens. A
+ * small local model then has no context left to answer in, and its reply arrives
+ * truncated mid-line, which Csound reports as "unexpected end of file".
+ *
+ * The information a reference needs is which opcodes a technique uses and roughly
+ * how they go together. Boilerplate, comments and score lines carry none of that,
+ * so they go.
+ */
+const BOILERPLATE = /^(ksmps|nchnls|0dbfs|instr\b|endin\b|<\/?Cs\w*>|[if]\s|;)/;
+
+function compactExample(src) {
+  const lines = String(src).split('\n').map((l) => l.trim()).filter(Boolean);
+  if (lines.length <= 1) return lines[0] || '';
+  const meat = lines.filter((l) => !BOILERPLATE.test(l));
+  return meat.slice(0, 3).join(' / ');
+}
+
+export function buildReference(envId = 'strudel', kit = [], { maxChars = 6000 } = {}) {
+  // No concept library means no grounding. Returning a half-empty reference would
+  // invite the model to fall back on whatever it remembers, which for Csound means
+  // 6.x idioms this build rejects. Callers check hasConcepts() and don't ask.
+  if (!hasConcepts(envId)) return '';
   const names = conceptNames(kit);
-  const preamble = envId === 'strudel' ? STRUDEL_PREAMBLE : '';
-  const version = envId === 'strudel' ? STRUDEL_REFERENCE_VERSION : '';
-  const lines = [];
-  for (const group of conceptsByCategory(envId)) {
-    lines.push(`\n## ${group.category}`);
-    for (const c of group.items) {
-      const ex = c.example ? ` — e.g. \`${c.example(names).replace(/\n/g, ' ')}\`` : '';
-      lines.push(`- ${c.label}: ${c.explain}${ex}`);
+  const preamble = PREAMBLES[envId] || '';
+  const version = VERSIONS[envId] || '';
+  const label = LANG_LABELS[envId] || envId;
+
+  // Rendered up to three times. A reference that doesn't fit leaves the model no
+  // room to answer in, and that surfaces as a reply cut off mid-line. So it sheds
+  // detail in order of expendability: examples first (the preamble already carries
+  // the grammar), then the explanations, keeping the technique NAMES longest —
+  // knowing what exists is the part a model cannot reconstruct for itself.
+  const render = ({ examples = true, explain = true } = {}) => {
+    const lines = [];
+    for (const group of conceptsByCategory(envId)) {
+      lines.push(`\n## ${group.category}`);
+      for (const c of group.items) {
+        const compact = examples && c.example ? compactExample(c.example(names)) : '';
+        const ex = compact ? ` — e.g. \`${compact}\`` : '';
+        lines.push(explain ? `- ${c.label}: ${c.explain}${ex}` : `- ${c.label}`);
+      }
+    }
+    const idioms = envId === 'strudel' && STRUDEL_IDIOMS.length
+      ? '\n\n## Idioms (prefer these; do not invent functions):\n- ' + STRUDEL_IDIOMS.join('\n- ')
+      : '';
+    return [
+      preamble,
+      version ? `\nThis targets ${label} ~${version}; only use functions available in that version.` : '',
+      '\nAvailable techniques (label: what it does — example):',
+      lines.join('\n'),
+      idioms,
+    ].filter(Boolean).join('\n');
+  };
+
+  const tiers = [
+    ['full', render()],
+    ['without examples', render({ examples: false })],
+    ['names only', render({ examples: false, explain: false })],
+  ];
+  for (const [name, text] of tiers) {
+    if (text.length <= maxChars) {
+      if (name !== 'full') {
+        console.warn(`[concepts] reference for ${envId} rendered "${name}" `
+          + `(${text.length} chars, budget ${maxChars}) so the model has room to answer.`);
+      }
+      return text;
     }
   }
-  const idioms = envId === 'strudel' && STRUDEL_IDIOMS.length
-    ? '\n\n## Idioms (prefer these; do not invent functions):\n- ' + STRUDEL_IDIOMS.join('\n- ')
-    : '';
-  return [
-    preamble,
-    version ? `\nThis targets Strudel ~${version}; only use functions available in that version.` : '',
-    '\nAvailable techniques (label: what it does — example):',
-    lines.join('\n'),
-    idioms,
-  ].filter(Boolean).join('\n');
+  const last = tiers[tiers.length - 1][1];
+  console.warn(`[concepts] reference for ${envId} is ${last.length} chars even at its smallest, `
+    + `over the ${maxChars} budget. The preamble alone may be too long for this model.`);
+  return last;
 }

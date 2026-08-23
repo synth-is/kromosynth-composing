@@ -62,6 +62,45 @@ export function providerMeta(id) {
   return PROVIDERS.find((p) => p.id === id) || PROVIDERS[0];
 }
 
+// A code rewrite is bounded work: cap it. Without a ceiling, local servers (LM
+// Studio defaults to unlimited) will happily run a repetition loop for tens of
+// thousands of tokens — which is exactly what happens when a follow-up request
+// feeds the model its own previous output.
+//
+// Per environment, because the natural size of an answer differs by an order of
+// magnitude: a Strudel edit is a one-liner, while a Csound answer is a whole
+// orchestra AND we explicitly ask it to comment generously. `env.maxTokens`
+// overrides; this is the floor for anything that doesn't set one.
+const MAX_TOKENS = 2048;
+const DEFAULT_TIMEOUT_MS = 120000;
+
+/**
+ * How long to wait, derived from how much output we allowed.
+ *
+ * `max_tokens` is the real bound on runaway generation; this timeout is only the
+ * backstop for servers that ignore it (the comment above), so it should be
+ * generous rather than tight. Tuned as a flat 120 s it was fine for Strudel
+ * one-liners — and then raising Csound's ceiling to 4096 tokens started aborting
+ * requests that local models were still legitimately working on. A ceiling and a
+ * deadline have to move together.
+ *
+ * ~8 tokens/second is a pessimistic floor for a model running on CPU.
+ */
+function timeoutFor(maxTokens) {
+  return Math.min(600000, Math.max(DEFAULT_TIMEOUT_MS, 60000 + maxTokens * 120));
+}
+
+/** Abort signal that fires on the caller's signal OR after `ms`. */
+function abortAfter(ms, outerSignal) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(new Error('timeout')), ms);
+  if (outerSignal) {
+    if (outerSignal.aborted) ctrl.abort(outerSignal.reason);
+    else outerSignal.addEventListener('abort', () => ctrl.abort(outerSignal.reason), { once: true });
+  }
+  return { signal: ctrl.signal, cleanup: () => clearTimeout(timer) };
+}
+
 /** Load the user's saved endpoint config (or null). */
 export function loadEndpoint() {
   try {
@@ -106,13 +145,43 @@ export function stripCodeFences(text) {
   return t.trim();
 }
 
-function buildSystemPrompt({ env, kit }) {
+/**
+ * Roughly how much prompt we aim to send, in characters (~4 chars per token).
+ *
+ * Generous, because trimming the reference costs grounding in the most direct way
+ * imaginable: the EXAMPLES are where the real opcode names live. Dropping them once
+ * produced a model that invented `pvstft` while `pvsanal` sat in an example we had
+ * withheld. At a 16k context there is no reason to economise — the full Csound
+ * reference is ~12k characters and still leaves ample room to answer.
+ *
+ * The tiering in buildReference is a backstop for genuinely small contexts, not
+ * routine behaviour. If it fires on a normal model, raise this rather than accept
+ * the trim.
+ *
+ * Learned the hard way: do NOT tune this against a SUSPECTED context limit. Rounds
+ * went into shrinking prompts for a 4k window that turned out to be 16k, while the
+ * real cause was our own max_tokens ceiling.
+ */
+const PROMPT_BUDGET_CHARS = 20000;
+const MIN_REFERENCE_CHARS = 1500;
+
+function buildSystemPrompt({ env, kit, userChars = 0 }) {
   const envId = env?.id || 'strudel';
-  const reference = buildReference(envId, kit);
+  // Adaptive: each edit makes the piece longer, so a fixed reference budget would
+  // quietly squeeze the answer as you work — failing late, on a big composition,
+  // which is when losing an edit hurts most.
+  const maxChars = Math.max(MIN_REFERENCE_CHARS, PROMPT_BUDGET_CHARS - userChars - 600);
+  const reference = buildReference(envId, kit, { maxChars });
   const names = (kit || []).map((k) => k.name).filter(Boolean);
+  // How you name a kit sound is language-specific: s("name") in Strudel, a quoted
+  // filesystem path in Csound. Hard-coding the Strudel form here sent every Csound
+  // request an instruction to write code that cannot work — exactly the leak
+  // docs/CSOUND_PLAN.md §5 warns about, in a different place than expected.
+  // env.sampleToken is the single source of truth for this.
+  const token = env?.sampleToken || ((n) => `"${n}"`);
   const sampleLine = names.length
-    ? `The kit currently holds these sample names (use them verbatim inside s("…")): ${names.join(', ')}.`
-    : 'The kit is currently empty; you may still write patterns, but s("name") calls stay silent until the user adds sounds.';
+    ? `The kit holds these sounds. Reference them EXACTLY as written here: ${names.map(token).join(', ')}.`
+    : 'The kit is empty, so there are no sounds to reference yet. You can still write code that makes sound without them.';
   return [
     `You are a live-coding assistant embedded in a ${env?.label || 'Strudel'} editor.`,
     `You rewrite the user's code to carry out a plain-English instruction, and you output ONLY code — no prose, no explanation, no markdown fences.`,
@@ -166,41 +235,95 @@ function reachHint(baseUrl) {
   return ' Is the server running with CORS enabled (and, for LM Studio, "Serve on Local Network")?';
 }
 
-async function callOpenAICompatible({ baseUrl, apiKey, model, system, user }) {
+/**
+ * Every provider reports this differently, but they all report it — and a cut-off
+ * answer is worth naming, because otherwise it arrives as a baffling syntax error
+ * about an "unexpected end of file" that the model never wrote.
+ */
+const TRUNCATED = ({ promptChars, maxTokens, answerChars, reasoningChars }) => {
+  const head = `The model\u2019s answer was cut off. Prompt ~${Math.round(promptChars / 4)} tokens, `
+    + `output allowance ${maxTokens}.`;
+  // An EMPTY answer with a full allowance is a different failure from a long one:
+  // the model spent the whole budget thinking and never started writing. Same
+  // finish_reason, opposite fix.
+  if (!answerChars && reasoningChars) {
+    return `${head} It used the entire allowance on internal reasoning (~${Math.round(reasoningChars / 4)} tokens) `
+      + 'and never began the answer. Raise the output limit, or use a model that doesn\u2019t think before answering.';
+  }
+  if (!answerChars) {
+    return `${head} It returned nothing at all — check the model and server settings.`;
+  }
+  return `${head} It simply wrote more than the ceiling, usually long comment blocks.`;
+};
+
+async function callOpenAICompatible({ baseUrl, apiKey, model, system, user, maxTokens, signal, timeoutMs }) {
   const url = baseUrl.replace(/\/+$/, '') + '/chat/completions';
   const headers = { 'Content-Type': 'application/json' };
   if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+  const { signal: sig, cleanup } = abortAfter(timeoutMs || DEFAULT_TIMEOUT_MS, signal);
   let res;
   try {
     res = await fetch(url, {
       method: 'POST',
       headers,
+      signal: sig,
       body: JSON.stringify({
         model,
         messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
         temperature: 0.4,
+        // Hard ceiling: see MAX_TOKENS. Servers that ignore max_tokens may still
+        // run long, but the abort signal above bounds the wait either way.
+        max_tokens: maxTokens || MAX_TOKENS,
         stream: false,
       }),
     });
-  } catch {
+  } catch (err) {
+    if (sig.aborted) {
+      const secs = Math.round((timeoutMs || DEFAULT_TIMEOUT_MS) / 1000);
+      throw new Error(
+        `The model didn't finish within ${secs}s. It may still be generating — local models are slow at this length. Try a shorter instruction, or select just the part you want changed.`,
+      );
+    }
     throw new Error(`Couldn't reach the model at ${baseUrl}.` + reachHint(baseUrl));
+  } finally {
+    cleanup();
   }
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     throw new Error(`Model error ${res.status}: ${body.slice(0, 200)}`);
   }
   const data = await res.json();
-  const content = data?.choices?.[0]?.message?.content;
+  const choice = data?.choices?.[0];
+  const msg = choice?.message || {};
+  const content = msg.content;
+  // Reasoning models return their chain of thought in a separate field, and it is
+  // charged against the SAME token allowance as the answer. Ignoring it made an
+  // empty reply look like a context problem when it was a budget problem.
+  const reasoning = msg.reasoning_content || msg.reasoning || '';
   if (typeof content !== 'string') throw new Error('Unexpected response shape from the model.');
+  // WHY an answer ended is the one fact that separates "the model wrote too much"
+  // from "the model had nowhere to write" from "the model never started".
+  console.log(`[ai] finish_reason=${choice?.finish_reason} · answer ~${content.length} chars`
+    + ` · reasoning ~${reasoning.length} chars`);
+  if (choice?.finish_reason === 'length') {
+    throw new Error(TRUNCATED({
+      promptChars: system.length + user.length,
+      maxTokens,
+      answerChars: content.length,
+      reasoningChars: reasoning.length,
+    }));
+  }
   return content;
 }
 
-async function callAnthropic({ baseUrl, apiKey, model, system, user }) {
+async function callAnthropic({ baseUrl, apiKey, model, system, user, maxTokens, signal, timeoutMs }) {
   const url = (baseUrl || 'https://api.anthropic.com').replace(/\/+$/, '') + '/v1/messages';
+  const { signal: sig, cleanup } = abortAfter(timeoutMs || DEFAULT_TIMEOUT_MS, signal);
   let res;
   try {
     res = await fetch(url, {
       method: 'POST',
+      signal: sig,
       headers: {
         'Content-Type': 'application/json',
         'x-api-key': apiKey,
@@ -210,13 +333,19 @@ async function callAnthropic({ baseUrl, apiKey, model, system, user }) {
       },
       body: JSON.stringify({
         model,
-        max_tokens: 2048,
+        max_tokens: maxTokens || MAX_TOKENS,
         system,
         messages: [{ role: 'user', content: user }],
       }),
     });
-  } catch {
+  } catch (err) {
+    if (sig.aborted) {
+      const secs = Math.round((timeoutMs || DEFAULT_TIMEOUT_MS) / 1000);
+      throw new Error(`Anthropic didn't finish within ${secs}s.`);
+    }
     throw new Error(`Couldn't reach Anthropic.` + reachHint(url));
+  } finally {
+    cleanup();
   }
   if (!res.ok) {
     const body = await res.text().catch(() => '');
@@ -227,6 +356,14 @@ async function callAnthropic({ baseUrl, apiKey, model, system, user }) {
     ? data.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n')
     : '';
   if (!text) throw new Error('Empty response from Anthropic.');
+  if (data?.stop_reason === 'max_tokens') {
+    throw new Error(TRUNCATED({
+      promptChars: system.length + user.length,
+      maxTokens,
+      answerChars: text.length,
+      reasoningChars: 0,
+    }));
+  }
   return text;
 }
 
@@ -234,16 +371,24 @@ async function callAnthropic({ baseUrl, apiKey, model, system, user }) {
  * Ask the configured model to rewrite the code.
  * @returns {Promise<{ code: string }>} the rewritten code (fences stripped).
  */
-export async function askEdit({ instruction, code, selection, kit, env, endpoint }) {
+export async function askEdit({ instruction, code, selection, kit, env, endpoint, signal, timeoutMs }) {
   if (!isConfigured(endpoint)) throw new Error('No AI endpoint configured.');
-  const system = buildSystemPrompt({ env, kit });
   const user = buildUserPrompt({ instruction, code, selection });
+  const system = buildSystemPrompt({ env, kit, userChars: user.length });
+  const maxTokens = env?.maxTokens || MAX_TOKENS;
+  // Prompt size is the thing that quietly grows as the concept library grows, and
+  // it is invisible until a small model runs out of room mid-answer. Cheap to see.
+  console.log(`[ai] prompt: system ~${system.length} chars, user ~${user.length} chars,`
+    + ` max_tokens ${maxTokens}`);
   const args = {
     baseUrl: endpoint.baseUrl || providerMeta(endpoint.provider).defaultBaseUrl,
     apiKey: endpoint.apiKey || '',
     model: endpoint.model,
     system,
     user,
+    maxTokens,
+    signal,
+    timeoutMs: timeoutMs || timeoutFor(maxTokens),
   };
   const raw = endpoint.provider === 'anthropic'
     ? await callAnthropic(args)

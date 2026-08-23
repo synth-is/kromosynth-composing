@@ -216,6 +216,13 @@ body {
 
 .current-seq { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.85; }
 
+/* AGPL source offer: persistent but quiet — metadata, not an action. */
+.source-link {
+  color: var(--muted); text-decoration: none; font-size: 12px;
+  border-bottom: 1px dotted var(--border); padding-bottom: 1px;
+}
+.source-link:hover { color: var(--accent-2); border-bottom-color: var(--accent-2); }
+
 /* selection bar (select-and-transform) */
 .selbar { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
 .selbar-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }

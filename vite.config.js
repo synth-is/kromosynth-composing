@@ -161,7 +161,14 @@ export default defineConfig({
     // be consumed directly ("No matching export ... for import default"). That's
     // why the package ships `dist`. The offline bounce instead stays entirely
     // within the dist instance; see src/lib/offlineRender.js.
-    dedupe: ['@strudel/webaudio', 'superdough', '@strudel/core'],
+    dedupe: [
+      '@strudel/webaudio', 'superdough', '@strudel/core',
+      // CodeMirror 6 breaks loudly if two copies of @codemirror/state or /view are
+      // loaded ('Unrecognized extension value'), and @strudel/repl carries its own
+      // CodeMirror for the Strudel pad while CsoundPad builds one directly. Both
+      // pads live in the same bundle, so force one copy.
+      '@codemirror/state', '@codemirror/view',
+    ],
   },
   // @strudel/repl ships its own worklets/wasm; let Vite pre-bundle it normally.
   // If you hit an optimize-deps error, add it to optimizeDeps.exclude here.
