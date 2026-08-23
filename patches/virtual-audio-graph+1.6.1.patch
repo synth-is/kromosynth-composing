@@ -1,0 +1,12 @@
+diff --git a/node_modules/virtual-audio-graph/dist/data.js b/node_modules/virtual-audio-graph/dist/data.js
+index bab5c31..7384efc 100644
+--- a/node_modules/virtual-audio-graph/dist/data.js
++++ b/node_modules/virtual-audio-graph/dist/data.js
+@@ -19,6 +19,7 @@ exports.constructorParamsKeys = [
+     "maxDelayTime",
+     "mediaElement",
+     "mediaStream",
++    "numberOfInputs",
+     "numberOfOutputs",
+ ];
+ exports.setters = ["position", "orientation"];

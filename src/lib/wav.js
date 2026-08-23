@@ -1,5 +1,77 @@
 /** Shared WAV helpers (used by the on-demand renderer and the Live bounce). */
 
+/**
+ * Remove a constant DC offset by subtracting the buffer mean. Phase-free — only the
+ * 0 Hz component is touched. An offset survives the edge fades and thumps when a clip
+ * starts/stops, and it eats normalisation headroom asymmetrically.
+ * Port of kromosynth's util/audio-buffer.js `removeDcOffset` (in place).
+ */
+export function removeDcOffset(buf) {
+  const n = buf.length;
+  if (!n) return buf;
+  let sum = 0;
+  for (let i = 0; i < n; i++) sum += buf[i];
+  const mean = sum / n;
+  if (mean !== 0) for (let i = 0; i < n; i++) buf[i] -= mean;
+  return buf;
+}
+
+/**
+ * Raised-cosine (Hann) fades at both edges so the buffer starts and ends at zero.
+ * Synthesis stopping at a non-zero value is an audible click; the fade-in is kept
+ * short so percussive attacks survive.
+ * Port of kromosynth's `ensureBufferStartsAndEndsAtZero` (in place).
+ */
+export function fadeEdges(buf, { fadeInSamples = 32, fadeOutSamples = 512 } = {}) {
+  const half = Math.floor(buf.length / 2);
+  const inLen = Math.min(fadeInSamples, half);
+  const outLen = Math.min(fadeOutSamples, half);
+  for (let i = 0; i < inLen; i++) buf[i] *= 0.5 * (1 - Math.cos((Math.PI * i) / inLen));
+  for (let i = 0; i < outLen; i++) {
+    buf[buf.length - 1 - i] *= 0.5 * (1 - Math.cos((Math.PI * i) / outLen));
+  }
+  return buf;
+}
+
+/**
+ * Attenuate (never boost) so nothing exceeds full scale — the render server's policy,
+ * and what keeps encodeWavPcm16's clamp from turning overshoot into hard clipping.
+ * Quiet buffers stay quiet: this is clip protection, not normalisation.
+ */
+export function protectFromClipping(buf) {
+  let peak = 0;
+  for (let i = 0; i < buf.length; i++) {
+    const a = Math.abs(buf[i]);
+    if (a > peak) peak = a;
+  }
+  if (peak > 1) {
+    const g = 1 / peak;
+    for (let i = 0; i < buf.length; i++) buf[i] *= g;
+  }
+  return buf;
+}
+
+/**
+ * Delivery declick: DC-trim, edge fades, then clip protection. Applied to BROWSER-
+ * rendered audio so it matches what the render server already does to its own output —
+ * `removeDcOffset(summed)` + `ensureBufferStartsAndEndsAtZero(summed, {128, 512})` in
+ * kromosynth-render/render-socket/src/worklet-offline-renderer.js. Without it a
+ * client-rendered sound clicks at both edges where a server-rendered one doesn't.
+ *
+ * Clip protection comes LAST and is not optional: the render already clip-protects, so
+ * peaks sit at or near 1.0, and subtracting the DC offset pushes the opposite side past
+ * full scale (measured 1.17 on a real genome). encodeWavPcm16 would clamp that into
+ * audible distortion.
+ *
+ * Delivery only — never the QD evaluation path (see the note on removeDcOffset there).
+ */
+export function declickForDelivery(buf) {
+  removeDcOffset(buf);
+  // Same lengths as the server's delivery path: 128 ≈ 2.7ms in, 512 ≈ 10.7ms out @48k.
+  fadeEdges(buf, { fadeInSamples: 128, fadeOutSamples: 512 });
+  return protectFromClipping(buf);
+}
+
 /** Encode mono Float32 PCM ([-1, 1]) as a 16-bit PCM WAV (Uint8Array). */
 export function encodeWavPcm16(f32, sampleRate) {
   const n = f32.length;

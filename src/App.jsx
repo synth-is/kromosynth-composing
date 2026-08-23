@@ -7,6 +7,12 @@ import { isAbletonHost, buildStemsSelection, sendToLive } from './lib/ableton.js
 import { bytesToBase64 } from './lib/wav.js';
 import { downloadWav, DEFAULT_BOUNCE } from './lib/offlineRender.js';
 import { renderToWavUrl } from './lib/renderClient.js';
+import { playAudition, stopAudition } from './lib/audition.js';
+import { prewarmBrowserRenderer, hasGpu } from './lib/browserRender.js';
+import {
+  loadRenderMode, saveRenderMode, resolveRenderMode,
+  RENDER_MODE_OPTIONS, RENDER_MODE_HINTS,
+} from './lib/renderMode.js';
 import { getEnvironment } from './lib/environments.js';
 import { conceptsByCategory, conceptNames, transforms as conceptTransforms, explainConcepts } from './lib/concepts.js';
 import * as llm from './lib/llm.js';
@@ -60,7 +66,6 @@ function groupSounds(sounds, mode) {
 
 export default function App() {
   const padRef = useRef(null);
-  const auditionRef = useRef(null);
   const replayAfterRenderRef = useRef(false);
   // Lets an AI (or other labelled) edit stamp the next trajectory snapshot; consumed by handleEval.
   const pendingLabelRef = useRef(null);
@@ -98,6 +103,20 @@ export default function App() {
   const [showConcepts, setShowConcepts] = useState(false);
   const [selection, setSelection] = useState(null); // { from, to, text } | null (editor selection)
   const [explainItems, setExplainItems] = useState(null); // concept[] | null ("explain this")
+
+  // Where on-demand renders run: 'auto' | 'client' | 'server' — see lib/renderMode.js.
+  const [renderMode, setRenderMode] = useState(() => loadRenderMode());
+  const [showRenderMode, setShowRenderMode] = useState(false);
+  const effectiveRenderMode = resolveRenderMode(renderMode);
+
+  // Load the render engine ahead of the first render when we'll be rendering here,
+  // so the first kit render isn't also paying the module-load cost.
+  useEffect(() => {
+    if (effectiveRenderMode === 'client') prewarmBrowserRenderer();
+  }, [effectiveRenderMode]);
+
+  // Nothing should keep playing after the app goes away.
+  useEffect(() => () => stopAudition(), []);
 
   // Ask-AI (bring-your-own-endpoint) state — see lib/llm.js.
   const [aiEndpoint, setAiEndpoint] = useState(() => llm.loadEndpoint());
@@ -266,12 +285,17 @@ export default function App() {
   };
 
   // --- audition (independent of Strudel; always the preview) ---
+  // Played through Web Audio with short attack/release ramps rather than an <audio>
+  // element, so stopping or switching sounds fades instead of cutting the waveform
+  // dead mid-cycle (an audible click). See lib/audition.js.
   const audition = async (sound) => {
-    const a = auditionRef.current;
-    if (!a) return;
-    if (auditionId === sound.id) { a.pause(); setAuditionId(null); return; }
+    if (auditionId === sound.id) { stopAudition(); setAuditionId(null); return; }
 
-    const playUrl = (url) => { a.src = url; return a.play().then(() => setAuditionId(sound.id)); };
+    const playUrl = async (url) => {
+      // false means a later click superseded this one while it was still loading —
+      // don't relabel the list, that sound isn't the one playing.
+      if (await playAudition(url, { onEnded: () => setAuditionId(null) })) setAuditionId(sound.id);
+    };
     const render = async () => {
       flash(`Rendering ${sound.label}…`);
       const url = await renderToWavUrl(sound.id, getEvoRunId(sound), { duration: sound.duration ?? 2, noteDelta: 0, velocity: 1 });
@@ -283,6 +307,7 @@ export default function App() {
       if (sound.previewUrl) await playUrl(sound.previewUrl).catch(() => render());
       else await render();
     } catch (e) {
+      setAuditionId(null);
       flash(`Could not play: ${(e.message || '').slice(0, 80)}`);
     }
   };
@@ -709,8 +734,6 @@ export default function App() {
 
   return (
     <div className="app">
-      <audio ref={auditionRef} onEnded={() => setAuditionId(null)} hidden />
-
       <header className="topbar">
         <div className="brand">Synth.is · <span className="brand-accent">Composing</span></div>
         <a className="btn ghost" href={api.SYNTHIS_APP_URL} title="Back to Synth.is">← Synth.is</a>
@@ -722,6 +745,14 @@ export default function App() {
             <span style={{ width: 10 }} />
           </>
         )}
+        <RenderModeControl
+          mode={renderMode}
+          effective={effectiveRenderMode}
+          open={showRenderMode}
+          onToggle={() => setShowRenderMode((v) => !v)}
+          onClose={() => setShowRenderMode(false)}
+          onChange={(m) => { setRenderMode(m); saveRenderMode(m); setShowRenderMode(false); }}
+        />
         <button className="btn ghost" onClick={() => setShowBounce(true)} title="Render the pattern to a WAV (offline, faster than realtime)">
           {bouncing ? `Bouncing… ${Math.round(bounceProgress * 100)}%` : 'Bounce…'}
         </button>
@@ -1149,6 +1180,62 @@ function ConceptsModal({ kit, onInsert, onCopy, onClose }) {
         <button className="btn ghost" onClick={onClose}>Close</button>
       </div>
     </Modal>
+  );
+}
+
+/**
+ * Subdued cogwheel in the header for where on-demand renders run. Mirrors the
+ * render-mode control in the web app's /ableton picker, down to the option labels,
+ * so the two apps read the same way.
+ */
+function RenderModeControl({ mode, effective, open, onToggle, onClose, onChange }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return undefined;
+    const onDocDown = (e) => { if (ref.current && !ref.current.contains(e.target)) onClose(); };
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('mousedown', onDocDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDocDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open, onClose]);
+
+  const activeLabel = effective === 'client' ? 'this browser' : 'the server';
+  return (
+    <div className="render-mode" ref={ref}>
+      <button
+        className="btn tiny ghost"
+        onClick={onToggle}
+        title={`Rendering on ${activeLabel} — click to change`}
+      >
+        ⚙ {effective === 'client' ? 'Browser' : 'Server'}
+      </button>
+      {open && (
+        <div className="render-mode-menu">
+          <div className="settings-title">Render sounds on</div>
+          {RENDER_MODE_OPTIONS.map((o) => (
+            <button
+              key={o.value}
+              className={mode === o.value ? 'render-mode-item active' : 'render-mode-item'}
+              onClick={() => onChange(o.value)}
+            >
+              <span className="render-mode-label">
+                {o.label}
+                {o.value === 'auto' && <span className="muted small"> → {activeLabel}</span>}
+              </span>
+              <span className="muted small">{RENDER_MODE_HINTS[o.value]}</span>
+            </button>
+          ))}
+          {!hasGpu() && (
+            <div className="muted small render-mode-note">
+              This browser has no WebGPU, so rendering here falls back to the CPU and is slow.
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 

@@ -126,6 +126,23 @@ body {
 .open-title { font-weight: 600; }
 .open-sub { color: var(--muted); font-size: 12px; }
 
+/* render-mode cogwheel (header) — where on-demand renders run */
+.render-mode { position: relative; }
+.render-mode-menu {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 40; width: 300px;
+  padding: 10px; background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.render-mode-item {
+  display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left;
+  padding: 7px 8px; margin-bottom: 2px; background: transparent; color: var(--text);
+  border: 1px solid transparent; border-radius: 6px; cursor: pointer;
+}
+.render-mode-item:hover { border-color: var(--accent-2); }
+.render-mode-item.active { background: var(--panel); border-color: var(--accent); }
+.render-mode-label { font-size: 13px; }
+.render-mode-note { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border); }
+
 /* render-settings panel */
 .settings-panel { margin-top: 10px; padding: 10px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; }
 .settings-title { font-size: 13px; color: var(--muted); margin-bottom: 8px; }

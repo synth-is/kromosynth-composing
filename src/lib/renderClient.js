@@ -1,11 +1,17 @@
 /**
  * On-demand genome rendering for the composing app.
  *
- * Ports the preview-WebSocket render the Ableton extension and the web app's
- * SoundRenderer use (the latter runs it in-browser, so it's browser-safe):
- *   → { type:'render', genome, duration, noteDelta, velocity, useGPU:true, batch:true, requestId }
- *   ← { type:'batch-result', sampleRate }   (JSON header)
- *   ← <binary Float32 mono payload>          (peak-normalised)
+ * Two interchangeable back ends, chosen by the render mode (see renderMode.js):
+ *
+ *  - SERVER — the preview-WebSocket render the Ableton extension also uses:
+ *      → { type:'render', genome, duration, noteDelta, velocity, useGPU:true, batch:true, requestId }
+ *      ← { type:'batch-result', sampleRate }   (JSON header)
+ *      ← <binary Float32 mono payload>          (clip-protected, not peak-normalised)
+ *    One shared process (render.synth.is), so renders queue behind everything else
+ *    running on that machine.
+ *
+ *  - CLIENT — the same kromosynth engine running here, in an OfflineAudioContext.
+ *    See browserRender.js.
  *
  * Result is encoded to a WAV blob URL so Strudel's samples() can load it — which
  * makes custom per-sound render settings (duration/pitch/velocity) *audible* in the
@@ -14,7 +20,9 @@
  * Genomes come from the recommend service (resolves all sound types by id).
  */
 import { RECOMMEND_URL } from './api.js';
-import { encodeWavPcm16 } from './wav.js';
+import { encodeWavPcm16, declickForDelivery } from './wav.js';
+import { renderInBrowser } from './browserRender.js';
+import { loadRenderMode, resolveRenderMode } from './renderMode.js';
 
 export const PREVIEW_WS_URL =
   import.meta.env.VITE_PREVIEW_WS_URL || 'ws://localhost:3000';
@@ -70,6 +78,8 @@ export function renderViaWebSocket(genome, { duration, noteDelta = 0, velocity =
 }
 
 // Cache blob URLs by (soundId + resolved settings) so re-renders and re-adds are instant.
+// Not keyed on render mode: the two paths are the same engine and should be
+// interchangeable — if they ever aren't, that's a bug worth seeing, not caching around.
 const cache = new Map();
 
 function keyOf(soundId, { duration, noteDelta, velocity }) {
@@ -79,12 +89,38 @@ function keyOf(soundId, { duration, noteDelta, velocity }) {
 /**
  * Render (or reuse) a WAV blob URL for a sound at the given settings.
  * `duration` must be resolved to a concrete number by the caller.
+ *
+ * Falls back to the server once if a client render fails, so a browser-side problem
+ * (no WebGPU, an unsupported node type, an OOM on a long duration) degrades to a
+ * slower render rather than a dead key in the kit.
+ *
+ * @returns {Promise<string>} blob URL
  */
 export async function renderToWavUrl(soundId, evoRunId, settings) {
   const key = keyOf(soundId, settings);
   if (cache.has(key)) return cache.get(key);
+
   const genome = await fetchGenome(soundId, evoRunId);
-  const { samples, sampleRate } = await renderViaWebSocket(genome, settings);
+  const wantClient = resolveRenderMode(loadRenderMode()) === 'client';
+
+  let rendered;
+  if (wantClient) {
+    try {
+      rendered = await renderInBrowser(genome, settings);
+      // Only the browser path needs this. The server declicks its own delivery output
+      // (worklet-offline-renderer.js), and running it a second time would shift the
+      // whole buffer by the post-fade DC residue and square the edge curves — small,
+      // but it would stop server WAVs being byte-identical to what /ableton imports.
+      declickForDelivery(rendered.samples);
+    } catch (e) {
+      console.warn('[render] browser render failed, falling back to the server:', e);
+      rendered = await renderViaWebSocket(genome, settings);
+    }
+  } else {
+    rendered = await renderViaWebSocket(genome, settings);
+  }
+
+  const { samples, sampleRate } = rendered;
   const wav = encodeWavPcm16(samples, sampleRate);
   const url = URL.createObjectURL(new Blob([wav], { type: 'audio/wav' }));
   cache.set(key, url);

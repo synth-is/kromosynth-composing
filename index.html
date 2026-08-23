@@ -4,6 +4,27 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Synth.is · Composing</title>
+    <!--
+      Minimal `process` shim. The kromosynth render engine (used for client-side
+      rendering) reads process.env feature flags at construction time, e.g.
+      `process.env.SYNTHIS_FAUST_OFFLINE_PATH` in cppn-neat/network-rendering.js.
+      It's a Node-first package; without this, the first browser render throws
+      "process is not defined". Same shim as kromosynth-desktop's index.html.
+    -->
+    <script>
+      (function () {
+        if (typeof process === 'undefined') {
+          window.process = {
+            env: {},
+            platform: 'browser',
+            version: '',
+            versions: {},
+            cwd: function () { return '/'; },
+            nextTick: function (fn) { setTimeout(fn, 0); },
+          };
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

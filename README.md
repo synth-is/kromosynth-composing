@@ -6,9 +6,15 @@ your Synth.is account so you can recall them later — the same save/recall beha
 live-coding unit in the Biomes view, but in its own app.
 
 This is a **personal-exploration** project: monetisation and quota concerns are deliberately
-set aside. It runs on its own origin and talks to the Synth.is backends only over HTTP
-(no build-time link to the closed platform), which is also what keeps its AGPL obligation —
-inherited from embedding Strudel — cleanly isolated.
+set aside. It runs on its own origin and talks to the Synth.is backends over HTTP, which
+keeps its AGPL obligation — inherited from embedding Strudel — cleanly isolated from the
+platform's own frontend.
+
+Its one build-time dependency on the rest of the project is the sibling **`kromosynth`**
+package (`file:../kromosynth`), used to render sounds in the browser instead of on the
+render server. That package is itself AGPL-3.0-or-later, so it carries no obligation this
+app doesn't already have. It is lazily imported — a session that never renders locally
+never loads it.
 
 ## Status
 
@@ -17,8 +23,9 @@ inherited from embedding Strudel — cleanly isolated.
 - Browse the **community pool** (no sign-in) or **your garden** (after sign-in).
 - Audition previews, add sounds to a **kit** (each becomes a Strudel `s("name")`).
 - Write/run patterns in an embedded Strudel editor.
-- **Per-sound render settings** (duration / pitch / velocity) via the parameterised
-  `/evorenders` URL — custom renders are just another sample URL.
+- **Per-sound render settings** (duration / pitch / velocity), rendered on demand to a
+  WAV blob URL so they're audible in Strudel — **on the server or in the browser**,
+  chosen by the ⚙ control in the header. See “Render modes” in `docs/RUNNING.md`.
 - **Composition-as-trajectory**: every Play is snapshotted; a scrubber replays the
   evolution of the piece. Saved inside the composition.
 - **Save / Open** compositions on your Synth.is account (sign-in required only to save).
