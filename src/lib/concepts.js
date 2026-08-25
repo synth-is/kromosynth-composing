@@ -755,6 +755,31 @@ i 1 0 2`),
     match: /\bvdelay\b/,
   },
   {
+    id: 'cs-feedback-delay', category: 'Effects', label: 'Echoes that repeat',
+    explain: 'A delay line you read from AND write back into, so each echo feeds the next and they decay away.',
+    example: (n) => csBuf(
+`instr 1
+  aSig diskin2 "${kitFilePath(n.a)}", 1
+  ; A short blip so the repeats are audible on their own.
+  aEnv linseg 0, 0.005, 0.5, 0.25, 0
+  aDry = aSig * aEnv
+
+  ; delayr opens a delay line and hands you what comes OUT of it.
+  ; The number is how long the line is, in seconds.
+  aDelayed delayr 0.35
+  ; delayw writes back IN. It has no output variable, so it sits on its own
+  ; line — and that pairing is what turns one echo into a series.
+  ; 0.6 is how much returns: raise it for more repeats, 1.0 never fades.
+  delayw aDry + aDelayed * 0.6
+
+  aMix = aDry + aDelayed * 0.6
+  out aMix, aMix
+endin`,
+`i 1 0 4`),
+    match: /\bdelayr\b/,
+  },
+
+  {
     id: 'cs-pan', category: 'Effects', label: 'Place it in the stereo field',
     explain: 'pan2 turns one signal into a stereo pair. Move the position and the sound travels.',
     example: (n) => csBuf(
@@ -1282,6 +1307,7 @@ const CSOUND_PREAMBLE = `Csound 7 (WebAssembly build). Essentials:
 - Output with \`out aL, aR\`. \`outs\` is DEPRECATED in Csound 7 — never emit it.
 - A variable's first letter is its rate: a... = audio rate (the sound itself), k... = control rate (movement), i... = set once at note start, S... = string.
 - TWO STATEMENT FORMS, and confusing them is the most common Csound error. (1) An OPCODE CALL has NO equals sign: \`aOut opcodename arg1, arg2\` — outputs on the left, then the opcode name, then comma-separated arguments. Several outputs are fine: \`aL, aR pan2 aSig, 0.3\`. (2) An ASSIGNMENT uses \`=\` for arithmetic on values you already have: \`aMix = aOne * 0.5 + aTwo\`. A single-output opcode may also be written as a function, and only THEN does it follow an \`=\`: \`aOut = moogladder(aSig, 900, 0.3)\`. NEVER mix the two — \`aOut = poscil 0.2, 220\` and \`aLeft, aRight = lorenz 0.01, 0.01\` are both syntax errors.
+- Some opcodes produce NO output and are written on their own line with nothing on the left: \`schedule 1, 0, 1\`, \`out aL, aR\`, \`chnset kVal, "name"\`, \`delayw aSig\`. Writing \`aX delayw aSig\` is an error.
 - One statement per line; there is no line-continuation character.
 - Supply the arguments an opcode actually takes, in order. Do not invent extra ones, and do not omit required ones to make a line look tidier.
 - p-fields come from the score line: p1 = instrument, p2 = start, p3 = duration, p4 onward are yours.

@@ -304,7 +304,13 @@ export function describeSignature(entry) {
     seen.add(key);
     const outs = [...(s.out || '')].map((c) => `${c} (${TYPE_WORDS[c] || 'unknown type'})`);
     const ins = [...(s.in || '')].map((c, i) => `${i + 1}. ${c} — ${TYPE_WORDS[c] || 'unknown type'}`);
-    lines.push(`${entry.name} outputs ${outs.length ? outs.join(', ') : 'nothing'}.\n`
+    // "outputs nothing" is a form, not an absence: those opcodes are written on a
+    // line by themselves with no variable on the left, and a model that assumes
+    // every opcode has an output writes `aX delayw aSig` and fails.
+    const head = outs.length
+      ? `${entry.name} outputs ${outs.join(', ')}.`
+      : `${entry.name} has NO output — write it on its own line, with nothing to the left of it.`;
+    lines.push(`${head}\n`
       + `Its arguments, IN THIS ORDER, are:\n${ins.length ? ins.map((l) => `  ${l}`).join('\n') : '  (none)'}`);
     if (lines.length >= 2) break; // two forms is plenty of context
   }
