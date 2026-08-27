@@ -1,0 +1,37 @@
+{
+  "name": "@kromosynth/strudel-faust",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Play evolved Faust instruments from Strudel patterns, live and offline.",
+  "license": "AGPL-3.0-or-later",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./compiler": "./src/compiler.js",
+    "./bindings": "./src/bindings.js",
+    "./schedule": "./src/schedule.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "keywords": [
+    "strudel",
+    "faust",
+    "livecoding",
+    "kromosynth",
+    "synth.is"
+  ],
+  "peerDependencies": {
+    "@grame/faustwasm": ">=0.16.0"
+  },
+  "peerDependenciesMeta": {
+    "@grame/faustwasm": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
