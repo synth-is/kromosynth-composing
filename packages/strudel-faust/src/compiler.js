@@ -173,6 +173,66 @@ export async function createFaustOfflineProcessor(source, {
 }
 
 /**
+ * Render a short probe and report how loud the thing actually is.
+ *
+ * WHY THIS EXISTS: the corpus spans 62 dB with no level policy on the live path.
+ * Measured over 20 elites, 4 sit below -45 dBFS (inaudible) and 2 above 0 dBFS
+ * (clipping). Someone adding a genome as an instrument has no way to tell which
+ * they got until they have committed it to a workspace and written a pattern
+ * against it — at which point silence is indistinguishable from a broken
+ * feature. It is not: see ELITE_PLAYABILITY_2026-08-29.md.
+ *
+ * Costs one short render on the offline processor describeSource already builds
+ * and throws away.
+ *
+ * AC-RMS with the mean removed, because these genomes carry DC offsets as large
+ * as -0.35 and a DC offset is not signal anyone can hear. Reported raw — no
+ * thresholds here, the caller decides what counts as too quiet.
+ */
+function measureLevel(proc, paths) {
+  const find = (s) => paths.find((p) => p === s || p.endsWith('/' + s));
+  try {
+    if (typeof proc.render !== 'function') return null;
+    if (typeof proc.start === 'function') proc.start();
+    const set = (name, v) => { const p = find(name); if (p) proc.setParamValue(p, v); };
+    set('freq', 130.81);   // c3: level varies with pitch, so fix one point
+    set('gain', 1);
+    const BLOCK = 512;
+    const pull = (blocks) => {
+      const out = [];
+      for (let i = 0; i < blocks; i++) {
+        const r = proc.render(BLOCK);
+        const ch = Array.isArray(r) ? r[0] : r;
+        if (ch) for (const v of ch) out.push(v);
+      }
+      return out;
+    };
+    pull(5);               // settle with the gate closed
+    set('gate', 1);        // a gate-pruned genome ignores this and drones
+    const buf = pull(50);
+    if (!buf.length) return null;
+    let sum = 0, peak = 0, nan = 0;
+    for (const v of buf) {
+      if (!Number.isFinite(v)) { nan++; continue; }
+      sum += v;
+      const a = Math.abs(v);
+      if (a > peak) peak = a;
+    }
+    const mean = sum / buf.length;
+    let ac = 0;
+    for (const v of buf) if (Number.isFinite(v)) ac += (v - mean) * (v - mean);
+    return {
+      dbfs: 20 * Math.log10(Math.max(Math.sqrt(ac / buf.length), 1e-12)),
+      peak,
+      dc: mean,
+      unstable: nan > 0,
+    };
+  } catch {
+    return null;   // a level we could not measure must not stop registration
+  }
+}
+
+/**
  * What knobs does this instrument have?
  *
  * Built on an offline processor rather than a worklet node so it costs no
@@ -200,6 +260,9 @@ export async function describeSource(source, { polyphony = 1 } = {}) {
     numInputs,
     numOutputs,
     voice: { freq: has('freq'), gain: has('gain'), gate: has('gate') },
+    // Effects are rejected upstream anyway, and probing one would render an
+    // unconnected input rather than the instrument.
+    level: numInputs === 0 ? measureLevel(proc, paths) : null,
   };
 }
 
@@ -207,4 +270,39 @@ export async function describeSource(source, { polyphony = 1 } = {}) {
 export function resolveParamPath(paths, name) {
   if (!name) return null;
   return paths.find((p) => p === name || p.endsWith('/' + name)) || null;
+}
+
+// ── console noise ───────────────────────────────────────────────────────────
+
+/**
+ * Drop faustwasm's per-node `sampleSize: N bufferSize: N` chatter.
+ *
+ * It logs once from the main thread and once from the worklet EVERY TIME a node
+ * is constructed. That is fine for an app that builds one instrument; here a
+ * node is a note, so sixteenths at 120 bpm produce sixteen lines a second and
+ * the console stops being usable for anything else — including the app's own
+ * AI validate loop, which reads console output looking for pattern errors.
+ *
+ * Installed ONCE and left in place, rather than swapped around each createNode
+ * call: createNode is async, so a temporary override would swallow whatever
+ * else happened to log inside that window. The filter matches only this one
+ * line shape and forwards everything else untouched.
+ *
+ * Returns an uninstall function, and is a no-op if already installed.
+ */
+const NODE_CHATTER = /^sampleSize:\s*\d+\s+bufferSize:\s*\d+\s*$/;
+let _uninstallLogFilter = null;
+
+export function silenceFaustNodeLogs() {
+  if (_uninstallLogFilter) return _uninstallLogFilter;
+  const original = console.log;
+  console.log = (...args) => {
+    if (args.length === 1 && typeof args[0] === 'string' && NODE_CHATTER.test(args[0])) return;
+    original.apply(console, args);
+  };
+  _uninstallLogFilter = () => {
+    console.log = original;
+    _uninstallLogFilter = null;
+  };
+  return _uninstallLogFilter;
 }

@@ -43,6 +43,7 @@
 
 import { renderPatternOffline } from './offlineRender.js';
 import { kitFilePath } from './csoundPaths.js';
+import { getFaustInstruments } from './faustInstruments.js';
 
 // NOTE: csoundPaths.js, not csoundEngine.js. This module is imported by App.jsx on
 // every load; importing the engine would pull @csound/browser and its wasm into
@@ -50,6 +51,62 @@ import { kitFilePath } from './csoundPaths.js';
 
 function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 function randInt(min, max) { return min + Math.floor(Math.random() * (max - min + 1)); }
+
+/**
+ * Three values spanning a slider's declared range.
+ *
+ * The hint used to hardcode "<2 6 12>", but applyParams clamps to the slider's
+ * min/max — and most of these sliders are normalised. For `lvl` (0.05–1) and
+ * `damp` (0–1) all three values clamped to the maximum, so the chip whose whole
+ * job is to demonstrate slider patterning produced a constant and taught the
+ * user that .fp() does nothing.
+ */
+function hintValues(inst, sliderName) {
+  const r = inst?.ranges?.[sliderName];
+  const lo = Number.isFinite(r?.min) ? r.min : null;
+  const hi = Number.isFinite(r?.max) ? r.max : null;
+  if (lo === null || hi === null || hi <= lo) return ['2', '6', '12'];
+  const at = (t) => {
+    const v = lo + (hi - lo) * t;
+    return String(Math.abs(v) >= 10 ? Math.round(v) : Number(v.toFixed(2)));
+  };
+  return [at(0.1), at(0.5), at(0.95)];
+}
+
+/**
+ * Hints for the Faust instruments currently loaded.
+ *
+ * Generated from the instrument's ACTUAL sliders rather than from a fixed list,
+ * for the same reason the kit hints are generated from the user's own sounds:
+ * these instruments are evolved, so two of them do not necessarily have the same
+ * knobs, and a hint naming a slider the instrument does not have teaches the
+ * wrong thing silently (.fp ignores unknown names).
+ */
+function faustHints() {
+  const instruments = getFaustInstruments();
+  if (!instruments.length) return [];
+  const inst = instruments[0];
+  const out = [
+    { label: 'Play a Faust instrument', code: `note("c3 e3 g3").s("${inst.name}")` },
+  ];
+  // A gate-pruned genome drones: note length, .clip() and "hold longer" are all
+  // inert on it, so offering them teaches the wrong thing.
+  if (inst.voice?.gate !== false) {
+    out.push({ label: 'Hold the notes longer', code: `note("c3 e3").s("${inst.name}").clip(2)` });
+  }
+  const [a, b] = inst.sliders;
+  if (a) {
+    const [x, y, z] = hintValues(inst, a);
+    out.push({ label: `Pattern its “${a}” slider`, code: `note("c3 e3 g3").s("${inst.name}").fp({ ${a}: "<${x} ${y} ${z}>" })` });
+  }
+  if (a && b) {
+    const [, av] = hintValues(inst, a);
+    const [, bv] = hintValues(inst, b);
+    out.push({ label: 'Two sliders at once', code: `note("c3").s("${inst.name}").fp({ ${a}: ${av}, ${b}: ${bv} })` });
+  }
+  out.push({ label: 'Through the effects chain', code: `note("c3 e3").s("${inst.name}").lpf(900).room(.4)` });
+  return out;
+}
 
 const strudel = {
   id: 'strudel',
@@ -72,11 +129,21 @@ const strudel = {
       { label: 'Euclidean rhythm', code: `s("${a}(3,8)")` },
       { label: 'Pitch it', code: `note("c e g").s("${a}")` },
       { label: 'Slow it down', code: `s("${a} ${b}").slow(2)` },
+      ...faustHints(),
     ];
   },
 
   makeStarter: (kit) => {
+    // A loaded Faust instrument leads, when there is one: it is the thing the
+    // sample kit cannot do, and a starter that only sequences samples never
+    // shows that these play pitches and hold.
+    const faust = getFaustInstruments()[0];
     const names = kit.map((k) => k.name);
+    if (faust) {
+      const line = `note("c3 e3 g3 b3").s("${faust.name}")`;
+      if (!names.length) return line;
+      return `stack(\n  ${line},\n  s("${names[0]}*4")\n)`;
+    }
     if (names.length === 0) return 's("sound1*4")';
     if (names.length === 1) return `s("${names[0]}*4")`;
     return `stack(\n${names.slice(0, 4).map((n) => `  s("${n}")`).join(',\n')}\n)`;

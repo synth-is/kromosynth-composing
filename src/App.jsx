@@ -16,6 +16,10 @@ import {
 import { getEnvironment, ENVIRONMENT_IDS } from './lib/environments.js';
 import { conceptsByCategory, conceptNames, transforms as conceptTransforms, explainConcepts, hasConcepts } from './lib/concepts.js';
 import * as llm from './lib/llm.js';
+import {
+  looksLikeFaustSound, addFaustInstrumentFromSound, removeFaustInstrument,
+  serialiseFaustInstruments, restoreFaustInstruments,
+} from './lib/faustInstruments.js';
 
 const ABLETON = isAbletonHost();
 
@@ -107,6 +111,17 @@ export default function App() {
   const [searchDesc, setSearchDesc] = useState(''); // what the current results are for (header)
   // kit entry: { name, soundId, evoRunId, previewUrl, url, duration, label, settings, rendering }
   const [kit, setKit] = useState([]);
+  // Faust instruments — a SEPARATE list from the kit, on purpose. A kit entry is a
+  // rendered WAV at a URL and every kit consumer assumes it: getKitMap, the render
+  // settings (duration/noteDelta/velocity bake pitch and length INTO a sample), the
+  // Ableton stems export, makeSnapshot's field whitelist. None of that means
+  // anything for a synth, where pitch is note(), level is .gain() and length is the
+  // event — an instrument in `kit` would be silently dropped from every trajectory
+  // snapshot, because trajectory.js copies sample fields only. Keeping the two apart
+  // makes "instruments never reach getKitMap()" true by construction rather than by
+  // a filter that eight call sites have to remember.
+  const [instruments, setInstruments] = useState([]);
+  const [addingInstrument, setAddingInstrument] = useState(null); // soundId currently compiling
   const [settingsFor, setSettingsFor] = useState(null);
   const [auditionId, setAuditionId] = useState(null);
   const [status, setStatus] = useState('');
@@ -313,7 +328,8 @@ export default function App() {
   // Duplicates are allowed on purpose: the same genome can be added again to get a
   // second Strudel key rendered at different settings.
   const addToKit = (sound) => {
-    const taken = new Set(kit.map((k) => k.name));
+    // One namespace: both kinds are referenced as s("name") in the same buffer.
+    const taken = new Set([...kit.map((k) => k.name), ...instruments.map((i) => i.name)]);
     const name = api.uniqueSampleName(sound, taken);
     const entry = {
       name,
@@ -376,6 +392,45 @@ export default function App() {
     const token = env.sampleToken(name);
     try { await navigator.clipboard.writeText(token); flash(`Copied ${token}`); }
     catch { flash(`Type: ${token}`); }
+  };
+
+  // --- instruments (Faust) ---
+  const addAsInstrument = async (sound) => {
+    const taken = new Set([...kit.map((k) => k.name), ...instruments.map((i) => i.name)]);
+    const name = api.uniqueSampleName(sound, taken);
+    setAddingInstrument(sound.id);
+    flash(`Compiling ${name}…`);
+    try {
+      const entry = await addFaustInstrumentFromSound(sound, { name });
+      setInstruments((prev) => [...prev, entry]);
+      // Everything worth warning about is only knowable HERE, after compiling and
+      // probing — never from the sound entry. Faust prunes widgets that reach no
+      // output, and level is a property of the rendered signal.
+      const db = entry.level?.dbfs;
+      const problems = [
+        entry.voice?.gate === false ? 'drones (no gate)' : null,
+        entry.voice?.freq === false ? 'ignores note() (no freq)' : null,
+        Number.isFinite(db) && db < -45 ? `very quiet at ${db.toFixed(0)} dBFS` : null,
+        entry.level?.peak > 1 ? 'clips — try .gain(.25)' : null,
+      ].filter(Boolean);
+      flash(
+        problems.length
+          ? `${env.sampleToken(entry.name)} added — ${problems.join(', ')}`
+          : `Added as ${env.sampleToken(entry.name)}`,
+        problems.length ? 9000 : 3000,
+      );
+    } catch (e) {
+      // The common case is a CPPN+DSP sound, and faustSourceFromGenome already
+      // says so in a sentence worth reading — don't clip it to nothing.
+      flash(`Can't play as an instrument: ${(e.message || '').slice(0, 140)}`, 8000);
+    } finally {
+      setAddingInstrument(null);
+    }
+  };
+
+  const removeInstrument = (name) => {
+    removeFaustInstrument(name);
+    setInstruments((prev) => prev.filter((i) => i.name !== name));
   };
 
   // --- audition (independent of Strudel; always the preview) ---
@@ -450,6 +505,10 @@ export default function App() {
         csound: csoundPadRef.current?.getCode?.() ?? pendingCodesRef.current.csound ?? '',
       },
       kit: cleanKit,
+      // The emitted .dsp, not a genome reference — see lib/faustInstruments.js
+      // under Persistence for why that is what makes a reopened composition
+      // sound the same.
+      instruments: serialiseFaustInstruments(),
       trajectories,
       trajectory, // the active environment's timeline, for older readers
     };
@@ -537,6 +596,17 @@ export default function App() {
   const handleOpen = (seq) => {
     const st = seq.unitState || {};
     setKit((Array.isArray(st.kit) ? st.kit : []).map((k) => ({ ...k, url: k.previewUrl, rendering: false })));
+    // Instruments are recompiled from their stored .dsp, so the composition sounds
+    // the same as when it was saved. Deliberately NOT awaited: each one compiles,
+    // and the buffer and kit should appear immediately. Always called, even with an
+    // empty list — it clears the previous composition's instruments.
+    setInstruments([]);
+    restoreFaustInstruments(Array.isArray(st.instruments) ? st.instruments : [])
+      .then(({ restored, failed }) => {
+        setInstruments(restored);
+        if (failed.length) flash(`Couldn't restore instrument${failed.length > 1 ? 's' : ''}: ${failed.join(', ')}`, 8000);
+      })
+      .catch((e) => flash(`Instruments failed to restore: ${(e.message || '').slice(0, 120)}`, 8000));
     const envFromState = st.environment || 'strudel';
     setEnvironmentId(envFromState);
     // Accept both shapes: the per-environment map, or a single legacy array.
@@ -1097,6 +1167,9 @@ export default function App() {
                         playing={auditionId === s.id}
                         onAudition={() => audition(s)}
                         onAdd={() => addToKit(s)}
+                        isFaust={looksLikeFaustSound(s)}
+                        addingInstrument={addingInstrument === s.id}
+                        onAddInstrument={() => addAsInstrument(s)}
                         onFindSimilar={() => findSimilar(s)}
                       />
                     ))}
@@ -1118,6 +1191,9 @@ export default function App() {
                         playing={auditionId === s.id}
                         onAudition={() => audition(s)}
                         onAdd={() => addToKit(s)}
+                        isFaust={looksLikeFaustSound(s)}
+                        addingInstrument={addingInstrument === s.id}
+                        onAddInstrument={() => addAsInstrument(s)}
                         onFindSimilar={() => findSimilar(s)}
                       />
                     ))}
@@ -1131,7 +1207,7 @@ export default function App() {
         <section className="workspace">
           <div className="kit">
             <div className="kit-head">
-              <span>Kit ({kit.length})</span>
+              <span>Kit ({kit.length}){instruments.length > 0 && ` · Instruments (${instruments.length})`}</span>
               <span className="muted small">click a name to copy · ⚙ for render settings</span>
             </div>
             <div className="kit-chips">
@@ -1151,6 +1227,39 @@ export default function App() {
                 );
               })}
             </div>
+
+            {instruments.length > 0 && (
+              <div className="kit-chips">
+                {instruments.map((i) => {
+                  // Everything the corpus can hand you that the code cannot fix.
+                  // Measured, not guessed: see ELITE_PLAYABILITY_2026-08-29.md.
+                  const db = i.level?.dbfs;
+                  const marks = [
+                    i.voice?.gate === false ? '∞' : null,          // drones, ignores note length
+                    i.voice?.freq === false ? '♪̸' : null,          // note() cannot reach it
+                    Number.isFinite(db) && db < -45 ? 'QUIET' : null,
+                    i.level?.peak > 1 ? 'CLIP' : null,
+                  ].filter(Boolean);
+                  const why = [
+                    i.origin?.seedName ? `evolved from ${i.origin.seedName}` : 'Faust instrument',
+                    Number.isFinite(db) ? `${db.toFixed(1)} dBFS` : null,
+                    i.voice?.gate === false ? 'no gate survived compilation — it drones' : null,
+                    i.voice?.freq === false ? 'no freq widget — note() does nothing' : null,
+                    Number.isFinite(db) && db < -45 ? 'very quiet — needs a large .gain()' : null,
+                    i.level?.peak > 1 ? 'over full scale — try .gain(.25)' : null,
+                    i.sliders?.length ? `sliders: ${i.sliders.join(', ')}` : 'no patternable sliders — .fp() has nothing to set',
+                  ].filter(Boolean).join(' · ');
+                  return (
+                    <span className="chip" key={i.name} title={why}>
+                      <button className="chip-name" title={`Copy ${env.sampleToken(i.name)}`} onClick={() => copyToken(i.name)}>
+                        ▣ {i.name}{marks.length ? ` ${marks.join(' ')}` : ''}
+                      </button>
+                      <button className="chip-x" title="Remove" onClick={() => removeInstrument(i.name)}>×</button>
+                    </span>
+                  );
+                })}
+              </div>
+            )}
 
             {openEntry && (
               <SettingsPanel
@@ -1275,7 +1384,7 @@ export default function App() {
 
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
-function SoundCard({ sound, playing, onAudition, onAdd, initialSpec, onFindSimilar }) {
+function SoundCard({ sound, playing, onAudition, onAdd, initialSpec, onFindSimilar, isFaust, addingInstrument, onAddInstrument }) {
   const ref = useRef(null);
   const [spec, setSpec] = useState(initialSpec ?? undefined); // undefined = not fetched, null = none, string = url
 
@@ -1297,7 +1406,10 @@ function SoundCard({ sound, playing, onAudition, onAdd, initialSpec, onFindSimil
   }, [sound.id, initialSpec]);
 
   const dur = sound.duration ? `${Number(sound.duration).toFixed(1)}s` : null;
-  const sub = [sound.soundType || sound.class, dur].filter(Boolean).join(' · ');
+  // `isFaust` is a run-id heuristic, not a verified substrate — it earns a word in
+  // the subtitle and an extra button, and nothing more. Pressing the button is what
+  // checks, and it explains itself when the sound turns out to be CPPN+DSP.
+  const sub = [isFaust ? 'faust' : null, sound.soundType || sound.class, dur].filter(Boolean).join(' · ');
   const title = sound.descriptors || sound.label;
 
   return (
@@ -1315,6 +1427,16 @@ function SoundCard({ sound, playing, onAudition, onAdd, initialSpec, onFindSimil
         </div>
         {onFindSimilar && <button className="btn tiny ghost" title="Find similar sounds" onClick={onFindSimilar}>≈</button>}
         <button className="btn tiny" title="Add to kit" onClick={onAdd}>+ kit</button>
+        {isFaust && (
+          <button
+            className="btn tiny"
+            title="Add as a playable Faust instrument (compiles the genome to a synth)"
+            disabled={addingInstrument}
+            onClick={onAddInstrument}
+          >
+            {addingInstrument ? '⋯' : '+ inst'}
+          </button>
+        )}
       </div>
     </div>
   );
