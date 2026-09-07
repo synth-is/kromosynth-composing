@@ -12,6 +12,10 @@
  */
 
 import { kitFilePath } from './csoundPaths.js';
+// Live list of loaded Faust instruments, for the AI reference. A static import is
+// fine here where csoundEngine's would not be: packages/strudel-faust pulls in no
+// heavy dependency of its own (faustwasm is loaded dynamically, on first compile).
+import { describeFaustInstruments } from './faustInstruments.js';
 
 // Strudel concepts. `quick: true` marks the highest-value select-transforms that
 // surface directly in the selection bar; the palette shows everything.
@@ -1321,6 +1325,7 @@ const CSOUND_PREAMBLE = `Csound 7 (WebAssembly build). Essentials:
 const STRUDEL_PREAMBLE = `Strudel is a JavaScript live-coding language (TidalCycles in the browser). Essentials:
 - Only the LAST top-level expression makes sound. Build ONE expression (use stack / arrange / cat), or prefix parallel parts with "$:".
 - Sound comes from samples: s("name") plays a registered sample; the available names are listed under the prompt.
+- Some names are FAUST INSTRUMENTS rather than samples — synths that play any pitch and last as long as the event. They are listed separately below, with the sliders each one accepts.
 - Mini-notation lives inside the quotes: "a b c" = a sequence (one per step); "a*4" = repeat 4x; "~" = a rest; "<a b>" = one per cycle (alternate); "[a b]" = a group/subdivision; "a(3,8)" = a Euclidean rhythm; "{a b, c d e}" = polymeter.
 - Chain transforms with dots: s("a*4").fast(2).lpf(800).room(.3).
 - Pitch: note("c e g") or n("0 2 4").scale("C:minor"). Layer with stack(a, b); one pattern per cycle with cat(a, b); arrange sections over cycles with arrange([4, a], [4, b]).
@@ -1368,6 +1373,28 @@ function compactExample(src) {
   return meat.slice(0, 3).join(' / ');
 }
 
+/**
+ * The Faust instruments loaded right now, named for the model.
+ *
+ * This block is never shed by the size tiers below, unlike examples and
+ * explanations. The reason is asymmetric cost: a model that has forgotten an
+ * example writes duller code, while a model that invents a slider name writes
+ * code that LOOKS right and does nothing — .fp() warns once and ignores an
+ * unknown name rather than failing, by design, so the failure is silent. The
+ * real names are the part it cannot reconstruct for itself.
+ */
+function faustSection() {
+  const instruments = describeFaustInstruments();
+  if (!instruments.length) return '';
+  return [
+    '\n## Faust instruments loaded right now',
+    'These are SYNTHS, not samples. s("name") plays one; note("c3 e3") or n(..).scale(..) sets pitch; the note lasts as long as the event, so .clip() and .legato() genuinely change the sound (unlike with a sample).',
+    'Set an instrument\u2019s own sliders with .fp({ name: value }); values may be patterns, e.g. .fp({ cutMul: "<2 6 12>" }).',
+    'ONLY the slider names listed here exist on a given instrument — do not invent others. Never put freq, gain or gate in .fp: those come from note(), velocity and the event length.',
+    ...instruments.map((line) => `- ${line}`),
+  ].join('\n');
+}
+
 export function buildReference(envId = 'strudel', kit = [], { maxChars = 6000 } = {}) {
   // No concept library means no grounding. Returning a half-empty reference would
   // invite the model to fall back on whatever it remembers, which for Csound means
@@ -1396,12 +1423,14 @@ export function buildReference(envId = 'strudel', kit = [], { maxChars = 6000 } 
     const idioms = envId === 'strudel' && STRUDEL_IDIOMS.length
       ? '\n\n## Idioms (prefer these; do not invent functions):\n- ' + STRUDEL_IDIOMS.join('\n- ')
       : '';
+    const faust = envId === 'strudel' ? faustSection() : '';
     return [
       preamble,
       version ? `\nThis targets ${label} ~${version}; only use functions available in that version.` : '',
       '\nAvailable techniques (label: what it does — example):',
       lines.join('\n'),
       idioms,
+      faust,
     ].filter(Boolean).join('\n');
   };
 

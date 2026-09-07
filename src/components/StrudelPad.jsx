@@ -1,5 +1,6 @@
 import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import '@strudel/repl';
+import { registerFaustInstrumentsInto } from '../lib/faustInstruments.js';
 
 /**
  * Wraps Strudel's <strudel-editor> web component (from @strudel/repl).
@@ -8,6 +9,11 @@ import '@strudel/repl';
  * prepend `await samples({...kit})` at *play* time. Strudel caches decoded
  * samples by URL, so re-registering on each play is cheap. The kit map is owned
  * by the parent and read via getKitMap() so it always reflects current state.
+ *
+ * Faust instruments do NOT go through prepended code. They are registered into
+ * the editor's own superdough instance via globalThis (which is where prebake's
+ * evalScope puts registerSound), so registration is an await before evaluate
+ * rather than a line of generated source. See lib/faustInstruments.js.
  *
  * onEval(code) fires on each Play so the parent can record the trajectory.
  *
@@ -119,10 +125,15 @@ const StrudelPad = forwardRef(function StrudelPad({ initialCode = '', getKitMap,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const doPlay = () => {
+  const doPlay = async () => {
     const el = elRef.current;
     const editor = el?.editor;
     if (!editor?.repl) return;
+    // Before evaluate, not prepended: a Faust instrument is a registered SOUND,
+    // not a sample URL. No-op when none are loaded, and a failure here must not
+    // stop the rest of the pattern from playing.
+    try { await registerFaustInstrumentsInto(); }
+    catch (err) { console.warn('[StrudelPad] Faust instrument registration failed:', err); }
     const kitMap = (getKitMap?.() || {});
     const body = (editor.code || '').trim() || 'silence';
     const parts = [];
@@ -139,7 +150,14 @@ const StrudelPad = forwardRef(function StrudelPad({ initialCode = '', getKitMap,
     const full = parts.join('\n');
     try {
       editor.repl.stop();
-      editor.repl.evaluate(full);
+      // AWAIT the evaluate. It is async — it transpiles, evaluates and only then
+      // calls scheduler.setPattern — so calling start() synchronously after it
+      // races, and the scheduler throws "no pattern set! call .setPattern
+      // first". The unawaited call was a latent bug that surfaced when doPlay
+      // became async for the Faust registration above; the sound still arrived,
+      // because evaluate autostarts once it finishes, so the only symptom was an
+      // uncaught rejection in the console.
+      await editor.repl.evaluate(full);
       editor.repl.start?.();
       setIsPlaying(true);
       onEval?.(editor.code || '');
@@ -208,6 +226,9 @@ const StrudelPad = forwardRef(function StrudelPad({ initialCode = '', getKitMap,
     validate: async (code) => {
       const editor = elRef.current?.editor;
       if (!editor?.repl) return { ok: false, error: 'editor not ready' };
+      // Same reason as doPlay: without this, s("<faust instrument>") resolves to
+      // nothing and the AI repair loop would be told its correct code was wrong.
+      try { await registerFaustInstrumentsInto(); } catch { /* reported on play */ }
       const kitMap = (getKitMap?.() || {});
       const parts = [];
       const kitEntries = Object.entries(kitMap);

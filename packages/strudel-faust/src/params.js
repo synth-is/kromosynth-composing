@@ -54,8 +54,54 @@ export function buildParamPlan({ paths = [], descriptors = [] }) {
   };
 }
 
+/**
+ * Headroom target for a single voice, as a peak amplitude.
+ *
+ * Evolved genomes arrive at wildly different levels — one measured peak 0.40,
+ * another 3.42, a third was inaudible. Worse, notes overlap: every voice rings
+ * for releaseTail past its note, so three can sound at once and sum. Playing a
+ * bare pattern therefore distorted until the user hand-tuned .gain() per
+ * instrument, which is a thing nobody should have to do twice.
+ *
+ * 0.25 leaves room for roughly four simultaneous voices before full scale.
+ * Applied through the Faust `gain` widget, which is clamped 0..1 — so this can
+ * only ever ATTENUATE, needs no change to the audio graph, and lands identically
+ * on the live and offline paths, preserving their sample-identical property.
+ *
+ * Derived from `source` alone, so it is stable across reloads without being
+ * serialised: same DSP, same probe, same trim.
+ */
+export const TARGET_PEAK = 0.25;
+
+export function trimForLevel(level) {
+  const peak = level?.peak;
+  if (!Number.isFinite(peak) || peak <= 0) return 1;
+  return Math.min(1, TARGET_PEAK / peak);
+}
+
 /** Names a pattern may address with .fp() — the note's own widgets excluded. */
 export const RESERVED = new Set(['freq', 'gain', 'gate']);
+
+/**
+ * The pitch these genomes are rendered and previewed at.
+ *
+ * WHY NOT JUST deps.getFrequencyFromValue: with no note() in the pattern,
+ * superdough falls back to its own default, which sits far below the 440 Hz
+ * renderFaustGenome uses (`440 * 2^(noteDelta/12)`, noteDelta 0). That broke the
+ * one property that makes browsing usable — what you audition is what you get —
+ * in two ways at once: bare s("x") played at the wrong pitch AND at the wrong
+ * level, because level on this corpus moves as much as 38 dB between c3 and a4.
+ *
+ * An explicit note or freq still wins. Bare s("x") now means "as previewed".
+ */
+export const RENDER_REFERENCE_HZ = 440;
+
+export function voiceFrequency(value, deps) {
+  if (value?.freq == null && value?.note == null && value?.n == null) {
+    return RENDER_REFERENCE_HZ;
+  }
+  return deps.getFrequencyFromValue(value);
+}
 
 export function patternableNames(plan) {
   return [...plan.byName.keys()].filter((k) => !RESERVED.has(k));
@@ -95,7 +141,8 @@ export function resetParamWarnings() {
  * its declared range is already a known hazard in this substrate.
  */
 export function applyParams(set, plan, params, { instrument = '?', logger } = {}) {
-  if (!params) return;
+  const applied = [];
+  if (!params) return applied;
   for (const [rawName, rawValue] of Object.entries(params)) {
     const name = String(rawName).toLowerCase();
     if (RESERVED.has(name)) {
@@ -125,5 +172,7 @@ export function applyParams(set, plan, params, { instrument = '?', logger } = {}
       continue;
     }
     set(entry.path, v);
+    applied.push([entry.label, v, entry.path]);
   }
+  return applied;
 }

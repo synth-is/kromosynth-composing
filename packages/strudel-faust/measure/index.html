@@ -22,6 +22,8 @@
   label { color:var(--dim); font-size:12px; margin-right:12px; }
   input[type=number] { width:64px; background:#0e0e10; color:var(--fg); border:1px solid var(--line);
                        border-radius:4px; padding:3px 5px; font:inherit; font-size:12px; }
+  input[type=text] { background:#0e0e10; color:var(--fg); border:1px solid var(--line);
+                     border-radius:4px; padding:3px 5px; font:inherit; font-size:12px; }
   #log { background:#0e0e10; border:1px solid var(--line); border-radius:6px; padding:10px;
          height:420px; overflow:auto; font-size:12px; }
   .line { white-space:pre-wrap; }
@@ -32,10 +34,11 @@
 
 <h1>strudel-faust — measurements</h1>
 <p class="sub">
-  Four numbers decide the shape of this package, and none of them is guessable.
+  Five checks decide the shape of this package, and none of them is guessable.
   Run these before the pattern-facing code exists, not after.
-  Serve from the composing dev server (<code>npm run dev</code>, then
-  <code>/packages/strudel-faust/measure/</code>) so that
+  Serve from the composing dev server (<code>npm start</code> for live backends,
+  <code>npm run dev</code> for local ones), then
+  <code>/packages/strudel-faust/measure/</code>, so that
   <code>/vendor/faustwasm/index.js</code> resolves.
   <strong>One at a time</strong> &mdash; the buttons disable while a measurement
   runs, because concurrent runs share the tap and invent plausible numbers
@@ -56,13 +59,13 @@
     <fieldset>
       <legend>1 · node construction — can a note afford its own node?</legend>
       <label>nodes <input type="number" id="nodes" value="50" min="1" max="500" /></label>
-      <button id="construction">Measure</button>
+      <button id="construction">1 &middot; Measure construction</button>
     </fieldset>
 
     <fieldset>
       <legend>2 · gate jitter — what does the MessagePort cost?</legend>
       <label>notes <input type="number" id="notes" value="40" min="1" max="200" /></label><br />
-      <button id="jitter-scheduled">scheduled</button>
+      <button id="jitter-scheduled">2 &middot; scheduled</button>
       <button id="jitter-immediate">immediate (floor: port + quantum)</button>
       <button id="jitter-buffer">buffer (floor: sample-accurate)</button>
     </fieldset>
@@ -70,13 +73,24 @@
     <fieldset>
       <legend>3 · voice ceiling</legend>
       <label>voices <input type="number" id="voices" value="32" min="1" max="256" /></label>
-      <button id="ceiling">Spawn</button>
+      <button id="ceiling">3 &middot; Spawn voices</button>
     </fieldset>
 
     <fieldset>
       <legend>4 · live vs offline — is the bounce the same instrument?</legend>
-      <button id="agreement">Compare</button>
+      <button id="agreement">4 &middot; Compare live vs offline</button>
       <button id="dl" disabled>Download DIFF WAV</button>
+    </fieldset>
+
+    <fieldset>
+      <legend>5 · parameter round-trip — does a slider reach the sound?</legend>
+      <label>slider <input type="text" id="slider" value="ratio" size="10" /></label>
+      <button id="roundtrip">5 &middot; Sweep min / init / max</button>
+      <div style="color:var(--dim); font-size:11px; margin-top:6px">
+        Drives the real voices, both backends. With the default instrument
+        <code>ratio</code> is a pitch multiplier, so the expected answer is
+        220&nbsp;Hz &times; the slider &mdash; a number, not a judgement about timbre.
+      </div>
     </fieldset>
   </div>
 

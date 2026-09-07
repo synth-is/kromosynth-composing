@@ -26,6 +26,11 @@
  *    the clip in Live is a different instrument from the one that was played.
  *    Sample-level diff stats plus a downloadable DIFF WAV, never A/B listening.
  *
+ * 5. PARAMETER ROUND-TRIP.  Does a slider actually reach the sound, live AND
+ *    bounced? The only one of the five that drives the real createLiveVoice and
+ *    renderOfflineVoice rather than the compiler directly, so it is the one that
+ *    would catch a break anywhere between a hap value and the audio.
+ *
  * MEASUREMENTS RUN ONE AT A TIME, and each waits for silence before arming.
  * Both rules are here because of what happened without them: several runs
  * launched together shared one tap, every arm caught the previous run's note
@@ -41,18 +46,29 @@ import {
   describeSource, resolveParamPath, clearFactoryCache,
 } from '../src/compiler.js';
 import { scheduleAtTime } from '../src/schedule.js';
+import { buildParamPlan, patternableNames } from '../src/params.js';
+import { createLiveVoice } from '../src/voice-live.js';
+import { renderOfflineVoice } from '../src/voice-offline.js';
 
 // A plain voice with the three magic widget names, so the page needs no genome
 // and no backend. Same shape as kromosynth/faust-genome's VOICE_PREAMBLE.
+//
+// `ratio` is deliberately a PITCH multiplier rather than a filter control. It is
+// what measurement 5 sweeps, and it makes the expected answer arithmetic —
+// 220 Hz times the slider — instead of a judgement about timbre. A cutoff
+// cannot do that job: between cutMul 2 and 20 this voice moves about half a
+// decibel of RMS, plainly audible as colour but indistinguishable from "nothing
+// happened" when the question is whether the parameter arrived at all.
 const DEFAULT_DSP = `import("stdfaust.lib");
 declare options "[midi:on][nvoices:8]";
 freq = hslider("freq[unit:Hz]", 440.0, 20.0, 8000.0, 0.001);
 gain = hslider("gain", 0.8, 0.0, 1.0, 0.001);
 gate = button("gate");
+ratio = hslider("ratio", 1.0, 0.25, 4.0, 0.01);
 cutMul = hslider("cutMul", 6.0, 1.0, 24.0, 0.01);
 q = hslider("q", 1.2, 0.5, 12.0, 0.01);
-process = os.sawtooth(freq) * en.ar(0.002, 0.25, gate)
-  : fi.resonlp(max(40.0, min(12000.0, freq * cutMul)), q, 1)
+process = os.sawtooth(freq * ratio) * en.ar(0.005, 0.4, gate)
+  : fi.resonlp(max(40.0, min(12000.0, freq * ratio * cutMul)), q, 1)
   : *(0.3) : *(gain);
 `;
 
@@ -464,12 +480,134 @@ function downloadDiff() {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+// ── 5. parameter round-trip ─────────────────────────────────────────────────
+
+/**
+ * Estimate the fundamental by zero-crossing rate, STRICTLY INSIDE the gate-on
+ * region.
+ *
+ * The window matters more than the method. Measured across the release tail
+ * instead, the same note reads roughly 20-30% flat — crossings stop once the
+ * decay has reached zero while the denominator keeps counting — and the result
+ * looks exactly like a real pitch bug in the bounce path. A 220 Hz saw that is
+ * silent after 0.40 s reads 218.3 Hz windowed inside the gate and 155.7 Hz
+ * windowed across the tail. That misreading cost a round of debugging; hence
+ * the explicit onset and the margin at both ends.
+ */
+function analyseNote(samples, sr, duration, onsetHint = null) {
+  let onset = onsetHint;
+  if (onset == null) {
+    onset = -1;
+    for (let i = 0; i < samples.length; i++) {
+      if (Math.abs(samples[i]) > 0.005) { onset = i; break; }
+    }
+    if (onset < 0) return { hz: null, peak: 0, rms: 0 };
+  }
+  const a = onset + Math.floor(0.10 * sr);
+  const b = Math.min(samples.length, onset + Math.floor((duration - 0.10) * sr));
+  if (b - a < sr * 0.05) return { hz: null, peak: 0, rms: 0 };
+  let cross = 0, peak = 0, sum = 0;
+  for (let i = a + 1; i < b; i++) {
+    if ((samples[i - 1] < 0) !== (samples[i] < 0)) cross++;
+    const x = Math.abs(samples[i]);
+    if (x > peak) peak = x;
+    sum += samples[i] * samples[i];
+  }
+  return {
+    hz: +(cross / 2 / ((b - a) / sr)).toFixed(1),
+    peak: +peak.toFixed(4),
+    rms: +Math.sqrt(sum / (b - a)).toFixed(5),
+  };
+}
+
+async function captureLiveNote(source, plan, value, deps) {
+  await waitForQuiet();
+  const recording = recordFor(value.duration + 0.5);
+  const handle = await createLiveVoice({
+    ctx, source, plan, instrument: 'measure',
+    t: ctx.currentTime + 0.15, value, onended: () => {}, deps, options: {},
+  });
+  handle.node.connect(tap);
+  const rec = await recording;
+  try { handle.node.disconnect(); handle.node.destroy?.(); } catch { /* gone */ }
+  return analyseNote(rec.samples, rec.sampleRate, value.duration);
+}
+
+async function renderBouncedNote(source, plan, value, deps) {
+  const sr = ctx.sampleRate;
+  const oac = new OfflineAudioContext(1, Math.round(sr * (value.duration + 2)), sr);
+  const handle = await renderOfflineVoice({
+    ctx: oac, source, plan, instrument: 'measure',
+    t: 0.02, value, onended: () => {}, deps, options: {},
+  });
+  // The rendered buffer starts AT gate-on, so the onset is sample 0.
+  return analyseNote(handle.node.buffer.getChannelData(0), sr, value.duration, 0);
+}
+
+async function measureRoundTrip() {
+  log('— parameter round-trip (live + bounce) —');
+  await ensureAudio();
+  const source = src();
+  const plan = buildParamPlan(await describeSource(source));
+
+  const wanted = ($('slider').value || '').trim().toLowerCase();
+  const entry = plan.byName.get(wanted);
+  if (!entry) {
+    log(`no slider "${wanted}" here. Available: ${patternableNames(plan).join(', ') || '(none)'}`, 'err');
+    return;
+  }
+  const values = [entry.min, entry.init, entry.max].filter((v) => Number.isFinite(v));
+  if (values.length < 2) { log(`"${wanted}" declares no range to sweep`, 'err'); return; }
+
+  const freq = 220;
+  const duration = 0.5;
+  // A stand-in for Strudel: this page has no Pattern, and the Faust side does
+  // not care where the frequency came from.
+  const deps = { getFrequencyFromValue: (v) => v.freq ?? freq, logger: (m) => log(m, 'warn') };
+  const isPitch = wanted === 'ratio';
+
+  const rows = [];
+  for (const v of values) {
+    const value = { s: 'measure', freq, duration, velocity: 1, faustParams: { [wanted]: v } };
+    const live = await captureLiveNote(source, plan, value, deps);
+    const offline = await renderBouncedNote(source, plan, value, deps);
+    rows.push({ v, live, offline });
+    const predicted = isPitch ? `   (expected ${(freq * v).toFixed(1)} Hz)` : '';
+    log(`${wanted}=${v}   live ${live.hz} Hz / peak ${live.peak}   bounce ${offline.hz} Hz / peak ${offline.peak}${predicted}`);
+  }
+
+  const moved = (get) => {
+    const xs = rows.map(get).filter((x) => x != null);
+    return xs.length > 1 && Math.max(...xs) / Math.max(1e-9, Math.min(...xs)) > 1.05;
+  };
+  const liveMoved = moved((r) => r.live.hz) || moved((r) => r.live.peak);
+  const bounceMoved = moved((r) => r.offline.hz) || moved((r) => r.offline.peak);
+  log(`slider reaches the LIVE voice: ${liveMoved ? 'yes' : 'NO'}`, liveMoved ? 'ok' : 'err');
+  log(`slider reaches the BOUNCE:     ${bounceMoved ? 'yes' : 'NO'}`, bounceMoved ? 'ok' : 'err');
+
+  const disagreed = rows.filter((r) => r.live.hz && r.offline.hz
+    && Math.abs(r.live.hz - r.offline.hz) / r.offline.hz > 0.02);
+  log(disagreed.length
+    ? `backends DISAGREE on ${disagreed.length}/${rows.length} values — the bounce is not the instrument that played`
+    : 'live and bounce agree within 2% on every value',
+    disagreed.length ? 'err' : 'ok');
+
+  if (isPitch) {
+    const missed = rows.filter((r) => r.offline.hz
+      && Math.abs(r.offline.hz - freq * r.v) / (freq * r.v) > 0.03);
+    log(missed.length
+      ? `${missed.length}/${rows.length} values missed the predicted pitch by more than 3%`
+      : 'every value hit its predicted pitch within 3%',
+      missed.length ? 'err' : 'ok');
+  }
+}
+
 // ── wiring ──────────────────────────────────────────────────────────────────
 
 $('dsp').value = DEFAULT_DSP;
 
 const BUTTONS = ['introspect', 'construction', 'jitter-scheduled', 'jitter-immediate',
-  'jitter-buffer', 'ceiling', 'agreement'];
+  'jitter-buffer', 'ceiling', 'agreement', 'roundtrip'];
 let busy = false;
 
 /**
@@ -498,6 +636,7 @@ $('jitter-immediate').addEventListener('click', run(() => measureJitter('immedia
 $('jitter-buffer').addEventListener('click', run(() => measureJitter('buffer')));
 $('ceiling').addEventListener('click', run(measureCeiling));
 $('agreement').addEventListener('click', run(measureAgreement));
+$('roundtrip').addEventListener('click', run(measureRoundTrip));
 $('dl').addEventListener('click', downloadDiff);
 $('clear').addEventListener('click', () => { $('log').innerHTML = ''; });
 

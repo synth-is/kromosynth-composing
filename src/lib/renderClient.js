@@ -21,7 +21,7 @@
  */
 import { RECOMMEND_URL } from './api.js';
 import { encodeWavPcm16, declickForDelivery } from './wav.js';
-import { renderInBrowser } from './browserRender.js';
+import { renderInBrowser, normalizeGenome } from './browserRender.js';
 import { loadRenderMode, resolveRenderMode } from './renderMode.js';
 
 export const PREVIEW_WS_URL =
@@ -101,7 +101,14 @@ export async function renderToWavUrl(soundId, evoRunId, settings) {
   if (cache.has(key)) return cache.get(key);
 
   const genome = await fetchGenome(soundId, evoRunId);
-  const wantClient = resolveRenderMode(loadRenderMode()) === 'client';
+  // Faust genomes go through the browser renderer WHATEVER the render mode says.
+  // Two reasons: the render-socket path does not handle this substrate at all
+  // (it reports "Genome data missing asNEATPatch"), and the mode preference
+  // exists because a CPPN without WebGPU falls back to a slow CPU path — a Faust
+  // genome has no CPPN to evaluate, it compiles to WASM and renders faster than
+  // the round trip. Verified bit-identical to the served preview.
+  const isFaust = normalizeGenome(genome)?.substrate === 'faust';
+  const wantClient = isFaust || resolveRenderMode(loadRenderMode()) === 'client';
 
   let rendered;
   if (wantClient) {
@@ -113,6 +120,9 @@ export async function renderToWavUrl(soundId, evoRunId, settings) {
       // but it would stop server WAVs being byte-identical to what /ableton imports.
       declickForDelivery(rendered.samples);
     } catch (e) {
+      // No fallback for Faust: the server cannot render it either, so falling back
+      // would replace a real error with a misleading one about asNEATPatch.
+      if (isFaust) throw e;
       console.warn('[render] browser render failed, falling back to the server:', e);
       rendered = await renderViaWebSocket(genome, settings);
     }

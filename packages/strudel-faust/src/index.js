@@ -12,7 +12,7 @@
  */
 
 import { getGenerator, describeSource, warmSource } from './compiler.js';
-import { buildParamPlan, patternableNames } from './params.js';
+import { buildParamPlan, patternableNames, trimForLevel } from './params.js';
 import { createLiveVoice } from './voice-live.js';
 import { renderOfflineVoice } from './voice-offline.js';
 import { resolveBindings } from './bindings.js';
@@ -66,18 +66,26 @@ function asName(x) {
  * because register() curries to a fixed arity and .fp is variadic — the object
  * form takes one argument and the pair form takes two. Core does the same for
  * its own variadic methods (.FX, .worklet, .partials).
+ *
+ * `.fparam` is installed alongside as a guaranteed name. The short name is
+ * pleasant but not ours to assume: if some Strudel version already defines `fp`
+ * (or another package got there first), a silent bail would leave .fp() calling
+ * something else that ignores our parameters — no error, no sound change, which
+ * is the single worst failure mode this package has and precisely what .fp's own
+ * unknown-name handling is designed to avoid. So a collision is LOUD.
  */
 export function installFp(deps) {
   const { Pattern, reify } = deps;
   if (!Pattern || !reify) {
     deps.logger?.(
-      '[strudel-faust] Pattern/reify not available — sounds are registered but .fp() is not installed.',
+      '[strudel-faust] Pattern/reify not available — sounds are registered but .fp() is not installed. '
+      + 'Register after the editor\u2019s prebake, or pass Pattern and reify in deps.',
       'warning',
     );
     return false;
   }
-  if (Pattern.prototype.fp) return false;
-  Pattern.prototype.fp = function fp(...args) {
+
+  const impl = function fp(...args) {
     if (args.length === 1 && args[0] && typeof args[0] === 'object' && typeof args[0].queryArc !== 'function') {
       return Object.entries(args[0]).reduce(
         (pat, [name, value]) => mergeParam(reify, pat, String(name).toLowerCase(), value),
@@ -89,7 +97,40 @@ export function installFp(deps) {
     }
     throw new Error("[strudel-faust] .fp() takes ({ name: value, … }) or ('name', value)");
   };
-  return true;
+  impl.__strudelFaust = true;
+
+  const installed = [];
+  const taken = [];
+  for (const name of ['fp', 'fparam']) {
+    const existing = Pattern.prototype[name];
+    if (existing?.__strudelFaust) { installed.push(name); continue; }
+    if (existing) { taken.push(name); continue; }
+    Pattern.prototype[name] = impl;
+    installed.push(name);
+  }
+
+  if (taken.length) {
+    deps.logger?.(
+      `[strudel-faust] Pattern.prototype.${taken.join(' and .')} already exists and is not ours — `
+      + `NOT overwriting. ${installed.length ? `Use .${installed[0]}() instead.` : 'No name left to install under.'}`,
+      installed.length ? 'warning' : 'error',
+    );
+  }
+  return installed.length > 0;
+}
+
+/**
+ * Which Faust parameter method is actually live on this instance, if any.
+ * Returns 'fp', 'fparam' or null — the first thing to check when .fp() appears
+ * to do nothing.
+ */
+export function faustParamMethod(deps = {}) {
+  const Pattern = deps.Pattern ?? globalThis.Pattern;
+  if (!Pattern) return null;
+  for (const name of ['fp', 'fparam']) {
+    if (Pattern.prototype[name]?.__strudelFaust) return name;
+  }
+  return null;
 }
 
 const REGISTERED = new Map();
@@ -116,6 +157,9 @@ export async function registerFaustSound(name, source, options = {}) {
     );
   }
   const plan = buildParamPlan(info);
+  // Attenuation that brings this genome to a common headroom. Measured, not
+  // chosen: see TARGET_PEAK. Rides on the plan so both voice paths get it.
+  plan.trim = trimForLevel(info.level);
   if (!plan.gate) {
     deps.logger?.(`[strudel-faust] "${key}" has no gate widget — Faust prunes widgets that reach no output, so notes will not articulate.`, 'warning');
   }
@@ -188,6 +232,8 @@ export {
 } from './compiler.js';
 
 export { scheduleAtTime } from './schedule.js';
-export { setGateLatency, getGateLatency } from './voice-live.js';
-export { buildParamPlan, patternableNames, resetParamWarnings, RESERVED } from './params.js';
+export { silenceFaustNodeLogs } from './compiler.js';
+export { setGateLatency, getGateLatency, setFaustDebug } from './voice-live.js';
+export { buildParamPlan, patternableNames, resetParamWarnings, RESERVED,
+         TARGET_PEAK, trimForLevel, RENDER_REFERENCE_HZ } from './params.js';
 export { resolveBindings, strudelScopeReady, whenStrudelScopeReady } from './bindings.js';

@@ -17,7 +17,7 @@
 
 import { createFaustNode } from './compiler.js';
 import { scheduleAtTime } from './schedule.js';
-import { applyParams } from './params.js';
+import { applyParams, voiceFrequency } from './params.js';
 
 // The MessagePort's constant lateness, subtracted before scheduling.
 //
@@ -35,6 +35,15 @@ export function getGateLatency() {
   return GATE_LATENCY;
 }
 
+// One-shot per-note tracing, for "the parameter is on the hap but nothing
+// changes". Logs the first N notes only: a pattern would otherwise produce a
+// line per event, and the point is to see what ONE note received.
+let DEBUG_REMAINING = 0;
+
+export function setFaustDebug(notes = 4) {
+  DEBUG_REMAINING = Math.max(0, notes | 0);
+}
+
 /**
  * Build one voice. Returns superdough's handle shape:
  * { node, nodes, stop } — see superdough/synth.mjs getOscillator for the
@@ -47,7 +56,9 @@ export async function createLiveVoice({
   const set = (path, v) => node.setParamValue(path, v);
 
   // The note itself.
-  if (plan.freq) set(plan.freq, deps.getFrequencyFromValue(value));
+  // voiceFrequency, not deps.getFrequencyFromValue: a bare s("x") with no
+  // note() must sound at the pitch it was previewed at. See params.js.
+  if (plan.freq) set(plan.freq, voiceFrequency(value, deps));
   if (plan.gain) {
     // Faust's `gain` widget IS the MIDI velocity binding, so velocity goes
     // here by default and the genome's own response to it is audible. Note
@@ -55,9 +66,24 @@ export async function createLiveVoice({
     // applies twice; .gain() is the single-application control. Set
     // velocityToGain: false to leave this at 1 and let superdough own level.
     const v = options.velocityToGain === false ? 1 : (value.velocity ?? 1);
-    set(plan.gain, v);
+    // plan.trim equalises wildly different genome levels into a common
+    // headroom so a bare pattern does not clip. Attenuation only.
+    set(plan.gain, v * (Number.isFinite(plan.trim) ? plan.trim : 1));
   }
   applyParams(set, plan, value.faustParams, { instrument, logger: deps.logger });
+
+  if (DEBUG_REMAINING > 0) {
+    DEBUG_REMAINING--;
+    const applied = applyParams(() => {}, plan, value.faustParams, { instrument });
+    console.warn('[strudel-faust] note', {
+      instrument,
+      valueKeys: Object.keys(value),
+      faustParams: value.faustParams ?? '(absent from the value superdough passed)',
+      applied: applied.length ? applied : '(nothing applied)',
+      planPaths: { freq: plan.freq, gain: plan.gain, gate: plan.gate },
+      nodeParams: typeof node.getParams === 'function' ? node.getParams() : '(no getParams)',
+    });
+  }
 
   const duration = Number.isFinite(value.duration) ? value.duration : 0.25;
   const tail = Number.isFinite(options.releaseTail) ? options.releaseTail : 1.0;

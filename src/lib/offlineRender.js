@@ -54,7 +54,11 @@ import {
   setSuperdoughAudioController,
   resetGlobalEffects,
   samples,
+  registerSound,
+  getAudioContext,
+  getFrequencyFromValue,
 } from '@strudel/webaudio';
+import { registerFaustInstrumentsInto } from './faustInstruments.js';
 import { encodeWavPcm16Multi } from './wav.js';
 
 export const DEFAULT_BOUNCE = {
@@ -118,6 +122,15 @@ export async function renderPatternOffline({
     if (kitMap && Object.keys(kitMap).length) {
       await samples(kitMap);
     }
+
+    // Faust instruments are in exactly the same two-registry situation, and are
+    // registered here rather than passed in so the bounce cannot be wrong by
+    // omission: without this every Faust event renders as silence while the CPPN
+    // events render fine — the silently incomplete WAV this file's header is
+    // about. getAudioContext is passed deliberately: it reads the SAME dist
+    // module state setAudioContext(ctx) just wrote, so the voice builds on the
+    // offline context. No-op when no Faust instrument is loaded.
+    await registerFaustInstrumentsInto({ registerSound, getAudioContext, getFrequencyFromValue });
 
     // Schedule in ascending onset order: controls that depend on audio-graph
     // state (e.g. `cut`) need it, and times are relative to fromCycle.

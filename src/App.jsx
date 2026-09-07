@@ -457,7 +457,9 @@ export default function App() {
       else await render();
     } catch (e) {
       setAuditionId(null);
-      flash(`Could not play: ${(e.message || '').slice(0, 80)}`);
+      // Long and slow on purpose: these messages carry the diagnosis (which key
+      // was missing, which substrate) and 80 chars cut it off mid-sentence.
+      flash(`Could not play: ${(e.message || '').slice(0, 300)}`, 12000);
     }
   };
 
@@ -1250,8 +1252,14 @@ export default function App() {
                     i.sliders?.length ? `sliders: ${i.sliders.join(', ')}` : 'no patternable sliders — .fp() has nothing to set',
                   ].filter(Boolean).join(' · ');
                   return (
-                    <span className="chip" key={i.name} title={why}>
-                      <button className="chip-name" title={`Copy ${env.sampleToken(i.name)}`} onClick={() => copyToken(i.name)}>
+                    <span className="chip" key={i.name}>
+                      {/* The title lives on the BUTTON, not the span: the button covers the
+                          whole chip, and a nested title always shadows its parent's. */}
+                      <button
+                        className="chip-name"
+                        title={`${why}\n\nClick to copy ${env.sampleToken(i.name)}`}
+                        onClick={() => copyToken(i.name)}
+                      >
                         ▣ {i.name}{marks.length ? ` ${marks.join(' ')}` : ''}
                       </button>
                       <button className="chip-x" title="Remove" onClick={() => removeInstrument(i.name)}>×</button>

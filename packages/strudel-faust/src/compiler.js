@@ -195,37 +195,63 @@ function measureLevel(proc, paths) {
     if (typeof proc.render !== 'function') return null;
     if (typeof proc.start === 'function') proc.start();
     const set = (name, v) => { const p = find(name); if (p) proc.setParamValue(p, v); };
-    set('freq', 130.81);   // c3: level varies with pitch, so fix one point
     set('gain', 1);
-    const BLOCK = 512;
+    // render(n) IGNORES n and returns exactly one block — a processor built with
+    // blockSize 128 hands back 128 samples however many you ask for, silently.
+    // So learn the block from the first call and count in blocks, not samples,
+    // or the probe window silently shrinks with the caller's blockSize.
+    const chan = (r) => (Array.isArray(r) ? r[0] : r);
+    const first = chan(proc.render(128));
+    const blk = first?.length || 128;
+    const sr = (typeof proc.getSampleRate === 'function' && proc.getSampleRate()) || 48000;
+    const blocksFor = (sec) => Math.max(1, Math.ceil((sec * sr) / blk));
     const pull = (blocks) => {
       const out = [];
       for (let i = 0; i < blocks; i++) {
-        const r = proc.render(BLOCK);
-        const ch = Array.isArray(r) ? r[0] : r;
+        const ch = chan(proc.render(blk));
         if (ch) for (const v of ch) out.push(v);
       }
       return out;
     };
-    pull(5);               // settle with the gate closed
-    set('gate', 1);        // a gate-pruned genome ignores this and drones
-    const buf = pull(50);
-    if (!buf.length) return null;
-    let sum = 0, peak = 0, nan = 0;
-    for (const v of buf) {
-      if (!Number.isFinite(v)) { nan++; continue; }
-      sum += v;
-      const a = Math.abs(v);
-      if (a > peak) peak = a;
+
+    // THREE PITCHES, NOT ONE. Level on this corpus is violently pitch-dependent:
+    // 01M11WNQWV19WC1FR25ZQA2M53 measures -49.2 dBFS at c3 and -11.2 dBFS at a4.
+    // A single-point probe at c3 would mark a perfectly usable sound QUIET, and
+    // a single point anywhere would miss a genome that only clips up high.
+    // So: quiet only if quiet EVERYWHERE, clipping if clipping ANYWHERE.
+    const probes = [130.81, 440, 880];   // c3, a4, a5
+    let best = -Infinity, worstPeak = 0, anyNaN = false, seconds = 0;
+    const perPitch = [];
+    for (const hz of probes) {
+      set('gate', 0);
+      set('freq', hz);
+      pull(blocksFor(0.05));       // settle, and let the previous note's tail die
+      set('gate', 1);              // a gate-pruned genome ignores this and drones
+      const buf = pull(blocksFor(0.4));
+      if (!buf.length) continue;
+      let sum = 0, peak = 0;
+      for (const v of buf) {
+        if (!Number.isFinite(v)) { anyNaN = true; continue; }
+        sum += v;
+        const a = Math.abs(v);
+        if (a > peak) peak = a;
+      }
+      const mean = sum / buf.length;
+      let ac = 0;
+      for (const v of buf) if (Number.isFinite(v)) ac += (v - mean) * (v - mean);
+      const dbfs = 20 * Math.log10(Math.max(Math.sqrt(ac / buf.length), 1e-12));
+      perPitch.push({ hz, dbfs, peak });
+      if (dbfs > best) best = dbfs;
+      if (peak > worstPeak) worstPeak = peak;
+      seconds += buf.length / sr;
     }
-    const mean = sum / buf.length;
-    let ac = 0;
-    for (const v of buf) if (Number.isFinite(v)) ac += (v - mean) * (v - mean);
+    if (!perPitch.length) return null;
     return {
-      dbfs: 20 * Math.log10(Math.max(Math.sqrt(ac / buf.length), 1e-12)),
-      peak,
-      dc: mean,
-      unstable: nan > 0,
+      dbfs: best,          // the loudest it gets — what it can do, not one sample of it
+      peak: worstPeak,     // the hottest it gets — what it might do to your output
+      perPitch,
+      seconds,
+      unstable: anyNaN,
     };
   } catch {
     return null;   // a level we could not measure must not stop registration
