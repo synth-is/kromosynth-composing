@@ -1,0 +1,30 @@
+{
+  "name": "@kromosynth/strudel-rack",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Play wclap-rack bundles (saved rack configurations: optional source instrument + serial WCLAP effect chain) from Strudel patterns.",
+  "license": "AGPL-3.0-or-later",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./bindings": "./src/bindings.js",
+    "./rack-worklet.js": "./src/rack-worklet.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "keywords": [
+    "strudel",
+    "wclap",
+    "webclap",
+    "rack",
+    "livecoding",
+    "kromosynth",
+    "synth.is"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

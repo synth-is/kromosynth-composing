@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>strudel-rack test</title>
+<style>body { font: 14px/1.4 system-ui, sans-serif; background: #16181d; color: #d7dae0; margin: 2rem; }
+#out { white-space: pre-wrap; color: #8ab4f8; }</style>
+</head>
+<body>
+<h1>@kromosynth/strudel-rack test</h1>
+<button id="run">Install + play synth-fx-rack through the voice</button>
+<div id="out">idle</div>
+<script type="module">
+import { installRack, loadRackBundle } from '../src/index.js';
+
+const out = (s) => { document.querySelector('#out').textContent = s; };
+window.__errors = [];
+window.addEventListener('error', (e) => window.__errors.push(String(e.message)));
+
+// minimal mock Strudel scope, same shape as the editor's globals after prebake
+const captured = {};
+const deps = {
+  registerSound: (name, fn, opts) => { captured[name] = fn; },
+  getAudioContext: () => window.__ctx,
+  Pattern: class Pattern {},
+  reify: (x) => x,
+  logger: (...a) => console.warn('[strudel-rack]', ...a),
+};
+
+document.querySelector('#run').onclick = async () => {
+  try {
+    const ctx = new AudioContext();
+    window.__ctx = ctx;
+    await ctx.resume();
+    installRack(deps);
+    if (!captured['wclap-rack']) throw new Error('sound not registered');
+    out('registered wclap-rack; loading bundle…');
+    const bundleUrl = new URL('./assets/synth-fx-rack.wclap-rack.tar.gz', location.href).href;
+    const { rack } = await loadRackBundle(bundleUrl);
+    out(`bundle ok: "${rack.name}" — source ${rack.source?.plugin}, ${rack.devices.length} devices; playing…`);
+    const voice = await captured['wclap-rack'](ctx.currentTime + 0.1, { rack: bundleUrl, frequency: 261.63, duration: 0.6, velocity: 0.8 }, () => {});
+    voice.node.connect(ctx.destination);
+    const an = ctx.createAnalyser();
+    voice.node.connect(an);
+    window.__voice = voice;
+    await new Promise((r) => { let n = 0; const t = () => { if (++n > 40) r(); else requestAnimationFrame(t); }; t(); });
+    const buf = new Float32Array(an.fftSize);
+    an.getFloatTimeDomainData(buf);
+    let sum = 0; for (const v of buf) sum += v * v;
+    out(`rms=${Math.sqrt(sum / buf.length).toFixed(4)} errors=${window.__errors.length} ${window.__errors[0] ?? ''}`);
+    window.__result = { rms: Math.sqrt(sum / buf.length), errors: window.__errors };
+  } catch (e) {
+    out('ERROR: ' + (e && e.stack || e));
+    window.__result = { error: String(e) };
+  }
+};
+</script>
+</body>
+</html>

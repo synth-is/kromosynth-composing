@@ -20,6 +20,7 @@ import {
   looksLikeFaustSound, addFaustInstrumentFromSound, removeFaustInstrument,
   serialiseFaustInstruments, restoreFaustInstruments,
 } from './lib/faustInstruments.js';
+import './lib/rackSounds.js'; // self-installs the wclap-rack sound + .rack() into the editor's Strudel
 
 const ABLETON = isAbletonHost();
 

@@ -59,6 +59,8 @@ import {
   getFrequencyFromValue,
 } from '@strudel/webaudio';
 import { registerFaustInstrumentsInto } from './faustInstruments.js';
+import { installRack } from '@kromosynth/strudel-rack';
+import { Pattern, reify } from '@strudel/core';
 import { encodeWavPcm16Multi } from './wav.js';
 
 export const DEFAULT_BOUNCE = {
@@ -131,6 +133,10 @@ export async function renderPatternOffline({
     // module state setAudioContext(ctx) just wrote, so the voice builds on the
     // offline context. No-op when no Faust instrument is loaded.
     await registerFaustInstrumentsInto({ registerSound, getAudioContext, getFrequencyFromValue });
+
+    // Same two-registry rule for rack sounds: the editor's instance has "wclap-rack",
+    // this bounce instance does not. Install into THIS instance (dist state) before rendering.
+    installRack({ registerSound, getAudioContext, getFrequencyFromValue, Pattern, reify, logger: console.warn });
 
     // Schedule in ascending onset order: controls that depend on audio-graph
     // state (e.g. `cut`) need it, and times are relative to fromCycle.
