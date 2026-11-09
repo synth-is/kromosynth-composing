@@ -16,6 +16,8 @@ class RackProcessor extends AudioWorkletProcessor {
 		this.hosts = new Map();
 		this.devices = [];
 		this.ready = false;
+		this.meterEvery = 0; // level-meter posting interval, 0 = off (see {type:'meter'})
+		this.meterCount = 0;
 		this.port.onmessage = (e) => { void this.onmsg(e.data); };
 	}
 
@@ -74,6 +76,8 @@ class RackProcessor extends AudioWorkletProcessor {
 		}
 		if (m.type === 'note' && this.source) {
 			this.source.pending.push({ frame: 0, type: m.on ? 'noteOn' : 'noteOff', key: m.key, velocity: m.on ? (m.velocity ?? 0.8) : 0, channel: 0, noteId: 1 });
+			// echo for viz (pianoroll ground truth: what the source is actually sounding)
+			this.port.postMessage({ type: 'note', on: m.on, key: m.key, velocity: m.velocity ?? 0.8 });
 		}
 		if (m.type === 'param') {
 			if (m.index === -1 && this.source) {
@@ -86,6 +90,12 @@ class RackProcessor extends AudioWorkletProcessor {
 		if (m.type === 'setOn') {
 			const d = this.devices[m.index];
 			if (d) d.on = m.on;
+		}
+		// level metering for viz panels: {type:'meter', on, every} — posts {type:'levels'} every
+		// `every` render blocks. Off by default; the page turns it on only while a viz is visible.
+		if (m.type === 'meter') {
+			this.meterEvery = m.on ? (m.every || 16) : 0;
+			this.meterCount = 0;
 		}
 	}
 
@@ -112,6 +122,19 @@ class RackProcessor extends AudioWorkletProcessor {
 	_process(inputs, outputs) {
 		const input = inputs[0], output = outputs[0];
 		if (!this.ready) return true;
+		// meter scratch, allocated once per block: per-device peak/rms accumulated over the interval
+		const meter = this.meterEvery > 0;
+		const levels = meter ? this.devices.map(() => ({ peak: 0, sum: 0, n: 0 })) : null;
+		const srcLevels = meter ? { peak: 0, sum: 0, n: 0 } : null;
+		const acc = (accObj, buf) => {
+			let peak = accObj.peak, sum = accObj.sum;
+			for (let i = 0; i < buf.length; i++) {
+				const a = buf[i] < 0 ? -buf[i] : buf[i];
+				if (a > peak) peak = a;
+				sum += a * a;
+			}
+			accObj.peak = peak; accObj.sum = sum; accObj.n += buf.length;
+		};
 		let l, r;
 		if (this.source) {
 			// source instrument renders from notes (no audio input); its output feeds the chain
@@ -122,6 +145,7 @@ class RackProcessor extends AudioWorkletProcessor {
 			const out = s.plugin.render(B, events);
 			l = out[0];
 			r = out[1] ?? out[0];
+			if (srcLevels) { acc(srcLevels, l); if (r !== l) acc(srcLevels, r); }
 		} else {
 			if (!input || input.length === 0) return true;
 			l = input[0];
@@ -135,6 +159,7 @@ class RackProcessor extends AudioWorkletProcessor {
 			const out = d.plugin.render(B, events, { input: [l, r] });
 			l = out[0];
 			r = out[1] ?? out[0];
+			if (levels) { const a = levels[d.index]; if (a) { acc(a, l); if (r !== l) acc(a, r); } }
 			if (events === d.events) { // first block: params applied now, latency may have changed
 				const lat = d.plugin.latency();
 				if (lat !== d.latency) {
@@ -142,6 +167,20 @@ class RackProcessor extends AudioWorkletProcessor {
 					this.port.postMessage({ type: 'latencyUpdate', index: d.index, latency: lat });
 				}
 			}
+		}
+		if (meter && ++this.meterCount >= this.meterEvery) {
+			this.meterCount = 0;
+			const rms = (a) => (a.n > 0 ? Math.sqrt(a.sum / a.n) : 0);
+			this.port.postMessage({
+				type: 'levels',
+				source: srcLevels ? { peak: srcLevels.peak, rms: rms(srcLevels) } : null,
+				devices: this.devices.map((d, i) => {
+					const a = levels[i];
+					return { index: d.index, on: !!d.on, peak: a ? a.peak : 0, rms: a ? rms(a) : 0 };
+				}),
+			});
+			if (levels) for (const a of levels) { a.peak = 0; a.sum = 0; a.n = 0; }
+			if (srcLevels) { srcLevels.peak = 0; srcLevels.sum = 0; srcLevels.n = 0; }
 		}
 		output[0].set(l);
 		if (output[1]) output[1].set(r);

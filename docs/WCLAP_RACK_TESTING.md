@@ -101,6 +101,31 @@ Verified 2026-11-09 with `npm run start` (http://localhost:5273), the example bu
 - offline bounce (cycles 0–2, 48 kHz): 8 haps, 0 skipped, WAV peak ≈ 0.067, RMS ≈ 0.015 —
   matches the reference host's direct `renderRack` output for the same notes.
 
+### Rack viz panel (2026-11-09, later)
+
+Below the Strudel pad there is now a **rack viz** panel (src/components/RackVizPanel.jsx) that drives
+itself off the live pattern — no viz method needed in the buffer:
+
+- **waveform** of the RAW rack output: an analyser fan-out on the shared worklet node
+  (`getRackAnalyser(spec)` from @kromosynth/strudel-rack)
+- **pianoroll** of the notes scheduled to the rack (queryArc over the current scheduler time), with
+  the worklet-echoed currently-sounding keys highlighted (the worklet echoes every `note` message)
+- **device strip** from the worklet's `ready` message: level bars (worklet `meter` messages,
+  throttled to every 16 blocks while the panel is up), on/off toggles (`setOn`) and one slider per
+  CLAP param (`param` messages) — so the panel is also a mixer/editor for the rack
+
+strudel-rack exports for this: `getRackAnalyser`, `getRackInfo`, `onRackEvent`, `sendRackMessage`,
+`setRackParam`, `setRackDeviceOn`, `setRackMeter`. Worklet protocol additions (backwards
+compatible): `{type:'meter', on, every}` in, `{type:'levels', source, devices:[{index,on,peak,rms}]}`
+and `{type:'note', on, key, velocity}` out.
+
+Plain Strudel viz also works on rack patterns as-is (superdough taps every sound's post-FX node into
+an analyser): `.scope({id: 3, ctx})` / `.fscope(...)` / `.spectrum(...)` and `.pianoroll({ctx})` —
+pass a named canvas's 2d context as `ctx` to render into a panel instead of the full-screen canvas.
+
+Verified 2026-11-09 in the browser: panel shows the rack name, waveform pixels + pianoroll pixels
+non-zero while playing, 118 param sliders across aether/wet-chorus/pearls, level bars at 3-7%.
+
 **Locally** (dev server), serve a rack bundle and use its URL, or the self-contained test page:
 
 ```sh

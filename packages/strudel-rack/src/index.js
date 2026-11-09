@@ -73,7 +73,7 @@ async function workletBundles(ctx, bundles) {
 // and exhaust the renderer's wasm memory budget (measured: 2nd node OOMs in a busy page).
 // The WCLAP source instrument is polyphonic internally, so sharing is correct; per-hap gain is
 // applied on a per-hap gain node fed from the shared node (fan-out does not stack).
-const nodeCache = new Map(); // rackSpec string -> { node, rack, ready, refs }
+const nodeCache = new Map(); // rackSpec string -> { node, rack, ready, refs, analyser, listeners, info }
 
 async function sharedRackNode(ctx, rackSpec) {
 	const key = String(rackSpec);
@@ -86,19 +86,74 @@ async function sharedRackNode(ctx, rackSpec) {
 	const { rack, bundles } = await loadRackBundle(rackSpec);
 	await ctx.audioWorklet.addModule(WORKLET_URL, { type: 'module' });
 	const node = new AudioWorkletNode(ctx, 'wclap-rack', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
+	// analyser fan-out on the shared node: the RAW rack output (all voices summed, pre per-hap FX),
+	// for viz. Passive — an analyser does not load the audio path.
+	const analyser = ctx.createAnalyser();
+	analyser.fftSize = 2048;
+	node.connect(analyser);
 	const wasm = await workletBundles(ctx, bundles);
 	const bundlesAB = {};
 	for (const [k, v] of Object.entries(wasm)) bundlesAB[k] = v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength);
-	const entry = { node, rack, refs: 1, ready: new Promise((resolve, reject) => {
-		node.port.onmessage = (e) => {
-			if (e.data.type === 'ready') resolve();
-			if (e.data.type === 'error') reject(new Error(e.data.message));
-		};
-	}) };
+	const entry = {
+		node, rack, analyser, refs: 1, listeners: new Set(), info: null,
+		ready: new Promise((resolve, reject) => {
+			node.port.onmessage = (e) => {
+				const m = e.data;
+				if (m.type === 'ready') { entry.info = m; resolve(); }
+				else if (m.type === 'error') reject(new Error(m.message));
+				for (const fn of entry.listeners) { try { fn(m); } catch { /* a listener must not break the others */ } }
+			};
+		}),
+	};
 	nodeCache.set(key, entry);
 	node.port.postMessage({ type: 'load', rack, bundles: bundlesAB });
 	await entry.ready;
 	return entry;
+}
+
+// ── viz / control surface over the shared node ──────────────────────────────
+
+/** The shared rack node's analyser (raw rack output), or null when the rack is not loaded. */
+export function getRackAnalyser(rackSpec) {
+	const entry = nodeCache.get(String(rackSpec));
+	return entry ? entry.analyser : null;
+}
+
+/** The `ready` message the worklet posted (latency, source + per-device params), or null. */
+export function getRackInfo(rackSpec) {
+	const entry = nodeCache.get(String(rackSpec));
+	return entry ? entry.info : null;
+}
+
+/** Subscribe to worklet messages (ready/levels/note/latencyUpdate/error) for one rack.
+    Returns an unsubscribe function. */
+export function onRackEvent(rackSpec, fn) {
+	const key = String(rackSpec);
+	const entry = nodeCache.get(key);
+	if (!entry) return () => {};
+	entry.listeners.add(fn);
+	return () => entry.listeners.delete(fn);
+}
+
+/** Post a message to the shared node (param / setOn / meter / note …). No-op when not loaded. */
+export function sendRackMessage(rackSpec, msg) {
+	const entry = nodeCache.get(String(rackSpec));
+	if (entry) entry.node.port.postMessage(msg);
+}
+
+/** Set a device (or the source, index -1) parameter on the shared node. */
+export function setRackParam(rackSpec, deviceIndex, paramId, value) {
+	sendRackMessage(rackSpec, { type: 'param', index: deviceIndex, id: paramId, value });
+}
+
+/** Bypass/unbypass a device on the shared node. */
+export function setRackDeviceOn(rackSpec, deviceIndex, on) {
+	sendRackMessage(rackSpec, { type: 'setOn', index: deviceIndex, on });
+}
+
+/** Turn level metering on/off (posts {type:'levels'} every `every` blocks while on). */
+export function setRackMeter(rackSpec, on, every = 16) {
+	sendRackMessage(rackSpec, { type: 'meter', on, every });
 }
 
 /** One hap's voice: superdough's { node, nodes, stop } contract. */
@@ -157,6 +212,7 @@ async function rackVoice(t, value, onended, deps) {
 		if (--entry.refs <= 0) { // last hap for this rack: drop the shared node (frees the wasm memory)
 			nodeCache.delete(String(rackSpec));
 			try { node.disconnect(); } catch {}
+			try { entry.analyser?.disconnect(); } catch {}
 			try { node.port.close(); } catch {}
 		}
 		onended?.();

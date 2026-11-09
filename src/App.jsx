@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import StrudelPad from './components/StrudelPad.jsx';
+import RackVizPanel from './components/RackVizPanel.jsx';
 import * as api from './lib/api.js';
 import { getEvoRunId, isDefaultSettings, DEFAULT_RENDER } from './lib/render.js';
 import { makeSnapshot, appendSnapshot, snapshotLabel } from './lib/trajectory.js';
@@ -1346,6 +1347,7 @@ export default function App() {
               visible. Csound mounts on first use — see the lazy import up top. */}
           <div style={{ display: environmentId === 'strudel' ? 'block' : 'none' }}>
             <StrudelPad ref={strudelPadRef} getKitMap={getKitMap} {...padEvents('strudel')} />
+            <RackVizPanel strudelRef={strudelPadRef} />
           </div>
           {csoundLoaded && (
             <div style={{ display: environmentId === 'csound' ? 'block' : 'none' }}>

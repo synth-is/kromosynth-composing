@@ -196,6 +196,8 @@ const StrudelPad = forwardRef(function StrudelPad({ initialCode = '', getKitMap,
       const sched = elRef.current?.editor?.repl?.scheduler;
       return sched?.pattern || null;
     },
+    // The whole repl (scheduler, evaluate, …), for panels that need more than the pattern.
+    getRepl: () => elRef.current?.editor?.repl ?? null,
     getSelection: () => {
       const sel = readSelection();
       return sel && sel.from !== sel.to ? sel : null;
