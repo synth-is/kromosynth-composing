@@ -67,6 +67,8 @@ export default function RackVizPanel({ strudelRef }) {
               const g = { index: m.index, url: `${base}${m.uri?.startsWith('/') ? m.uri : '/' + (m.uri ?? 'index.html')}` };
               guiRef.current = g;
               setGui(g);
+              // the view renders inline under the clicked device line — bring it into view
+              setTimeout(() => iframeRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 60);
             }
           })();
         }
@@ -226,47 +228,35 @@ export default function RackVizPanel({ strudelRef }) {
       {!collapsed && (
         <>
           <canvas ref={canvasRef} style={{ width: '100%', height: 140, display: 'block', borderRadius: 6 }} />
-          {gui && (
-            <div style={{ marginTop: 6, border: '1px solid #2a2f3a', borderRadius: 6, overflow: 'hidden' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '3px 8px', background: '#171a20' }}>
-                <span style={{ flex: '1 1 auto', fontSize: 11, color: '#9aa4b2' }}>
-                  device {gui.index === -1 ? 'source' : gui.index} native view
-                </span>
-                <button className="mini" style={{ fontSize: 10, cursor: 'pointer' }} onClick={() => spec && closeRackDeviceGui(spec, gui.index)}>close ×</button>
-              </div>
-              <iframe
-                ref={iframeRef}
-                src={gui.url}
-                title={`rack device ${gui.index}`}
-                style={{ width: '100%', height: 320, border: 0, display: 'block', background: '#111012' }}
-              />
-            </div>
-          )}
           {(devices.length > 0 || source) && (
             <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 4 }}>
               {source && (
-                <DeviceRow
-                  key="src"
-                  name={`${source.plugin} (source)`}
-                  params={source.params}
-                  level={levels?.source}
-                  onParam={(id, v) => setRackParam(spec, -1, id, v)}
-                  onView={() => openNative(-1)}
-                  viewOpen={gui?.index === -1}
-                />
+                <React.Fragment key="src">
+                  <DeviceRow
+                    name={`${source.plugin} (source)`}
+                    params={source.params}
+                    level={levels?.source}
+                    onParam={(id, v) => setRackParam(spec, -1, id, v)}
+                    onView={() => openNative(-1)}
+                    viewOpen={gui?.index === -1}
+                  />
+                  {gui?.index === -1 && <NativeView index={-1} url={gui.url} onClose={() => spec && closeRackDeviceGui(spec, -1)} iframeRef={iframeRef} />}
+                </React.Fragment>
               )}
               {devices.map((d) => (
-                <DeviceRow
-                  key={d.index}
-                  name={d.plugin ?? `device ${d.index}`}
-                  bypassed={d.bypassed || (levels && !levels.devices.find((x) => x.index === d.index)?.on)}
-                  params={d.params}
-                  level={levels?.devices?.find((x) => x.index === d.index)}
-                  onParam={(id, v) => setRackParam(spec, d.index, id, v)}
-                  onToggle={(on) => setRackDeviceOn(spec, d.index, on)}
-                  onView={() => openNative(d.index)}
-                  viewOpen={gui?.index === d.index}
-                />
+                <React.Fragment key={d.index}>
+                  <DeviceRow
+                    name={d.plugin ?? `device ${d.index}`}
+                    bypassed={d.bypassed || (levels && !levels.devices.find((x) => x.index === d.index)?.on)}
+                    params={d.params}
+                    level={levels?.devices?.find((x) => x.index === d.index)}
+                    onParam={(id, v) => setRackParam(spec, d.index, id, v)}
+                    onToggle={(on) => setRackDeviceOn(spec, d.index, on)}
+                    onView={() => openNative(d.index)}
+                    viewOpen={gui?.index === d.index}
+                  />
+                  {gui?.index === d.index && <NativeView index={d.index} url={gui.url} onClose={() => spec && closeRackDeviceGui(spec, d.index)} iframeRef={iframeRef} />}
+                </React.Fragment>
               ))}
             </div>
           )}
@@ -315,6 +305,25 @@ function DeviceRow({ name, params = [], level, bypassed, onParam, onToggle, onVi
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function NativeView({ index, url, onClose, iframeRef }) {
+  return (
+    <div style={{ margin: '2px 0 4px 10px', border: '1px solid #2a2f3a', borderRadius: 6, overflow: 'hidden' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '3px 8px', background: '#171a20' }}>
+        <span style={{ flex: '1 1 auto', fontSize: 11, color: '#9aa4b2' }}>
+          device {index === -1 ? 'source' : index} native view
+        </span>
+        <button className="mini" style={{ fontSize: 10, cursor: 'pointer' }} onClick={onClose}>close ×</button>
+      </div>
+      <iframe
+        ref={iframeRef}
+        src={url}
+        title={`rack device ${index}`}
+        style={{ width: '100%', height: 320, border: 0, display: 'block', background: '#111012' }}
+      />
     </div>
   );
 }
