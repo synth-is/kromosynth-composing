@@ -13,8 +13,13 @@
  * packages/strudel-rack/src/bindings.js.
  */
 
+import * as strudelRack from '@kromosynth/strudel-rack';
 import { installRack } from '@kromosynth/strudel-rack';
 import { whenStrudelScopeReady } from '@kromosynth/strudel-faust';
+
+// The module instance itself, for the viz panel and debugging — dynamic import() of the package
+// URL can yield a second instance with its own (empty) node cache.
+globalThis.__strudelRackModule = strudelRack;
 
 export async function installRackIntoStrudel() {
   try {
@@ -30,3 +35,12 @@ export async function installRackIntoStrudel() {
 
 // self-install at import, like installFaustGlobal()
 installRackIntoStrudel();
+
+// Register the wclap-sw.js service worker so a rack device's own editor page (the bundle's
+// index.html + resource/*) can be served under /__wclap__/… and loaded in an iframe by the
+// RackVizPanel. Harmless when unsupported or already registered.
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/wclap-sw.js').catch((err) => {
+    console.warn('[rackSounds] wclap-sw registration failed (device UIs in iframes unavailable):', err);
+  });
+}

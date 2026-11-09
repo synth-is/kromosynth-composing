@@ -3,11 +3,15 @@
 //   · waveform of the RAW rack output (analyser fan-out on the shared worklet node)
 //   · pianoroll of the notes scheduled to the rack (pattern.queryArc, event-level)
 //   · per-device strip from the worklet's `ready` message: level bars (meter messages),
-//     bypass toggles and parameter sliders, all posted back over the node port
-// Drives itself with its own rAF — independent of re-evals, works for any pattern
-// using s("wclap-rack") without tagging it with a viz method.
+//     bypass toggles, parameter sliders (param messages) and a "view" button per device that
+//     opens the plugin's OWN editor page (the bundle's index.html served by /wclap-sw.js in an
+//     iframe, frames relayed over clap.webview) — the same native view the Synth.is plugin shows
+// The whole panel collapses to its toolbar line (handy with several racks on screen).
 import React, { useEffect, useRef, useState } from 'react';
-import { getRackAnalyser, getRackInfo, onRackEvent, setRackMeter, setRackParam, setRackDeviceOn } from '@kromosynth/strudel-rack';
+import {
+  getRackAnalyser, getRackInfo, getRack, onRackEvent, setRackMeter, setRackParam, setRackDeviceOn,
+  openRackDeviceGui, sendRackGuiFrame, closeRackDeviceGui, handleRackGuiMessage, serveRackBundleUi,
+} from '@kromosynth/strudel-rack';
 
 const LOOKBEHIND = 1;   // cycles
 const LOOKAHEAD = 3;    // cycles
@@ -25,17 +29,55 @@ function noteToMidi(v) {
 
 export default function RackVizPanel({ strudelRef }) {
   const canvasRef = useRef(null);
+  const iframeRef = useRef(null);
   const [spec, setSpec] = useState(null);       // active rack URL
   const [info, setInfo] = useState(null);       // worklet `ready` message
   const [levels, setLevels] = useState(null);   // latest `levels` message
   const [notes, setNotes] = useState([]);       // echoed note on/off events (sounding now)
+  const [collapsed, setCollapsed] = useState(false);
+  const [gui, setGui] = useState(null);         // { index, url } when a device's native view is open
   const specRef = useRef(null);
+  const guiRef = useRef(null);
   const levelsRef = useRef(null);
   const notesRef = useRef([]);
 
-  // find the rack the current pattern is playing, and subscribe to its worklet
+  // find the rack the current pattern is playing, and subscribe to its worklet. The node is
+  // created asynchronously (fetch + wasm compile), so the subscription is (re)made whenever the
+  // `ready` info appears or changes — onRackEvent no-ops while the node does not exist yet.
+  const infoRef = useRef(null);
   useEffect(() => {
     let unsub = null;
+    let subscribed = null; // { spec, info }
+    const handler = (found) => (m) => {
+      handleRackGuiMessage(found, m);
+      if (m.type === 'ready') { infoRef.current = m; setInfo(m); }
+      else if (m.type === 'levels') { levelsRef.current = m; setLevels(m); }
+      else if (m.type === 'note') {
+        const cur = notesRef.current.filter((n) => n.key !== m.key);
+        if (m.on) cur.push({ key: m.key, velocity: m.velocity });
+        notesRef.current = cur;
+        setNotes(cur);
+      } else if (m.type === 'gui') {
+        if (m.ok) {
+          (async () => {
+            const rack = getRack(found);
+            const bundleKey = m.index === -1 ? rack?.source?.bundle : rack?.devices?.[m.index]?.bundle;
+            const base = bundleKey ? await serveRackBundleUi(found, bundleKey) : null;
+            if (base) {
+              const g = { index: m.index, url: `${base}${m.uri?.startsWith('/') ? m.uri : '/' + (m.uri ?? 'index.html')}` };
+              guiRef.current = g;
+              setGui(g);
+            }
+          })();
+        }
+      } else if (m.type === 'guiFrame') {
+        const cw = iframeRef.current?.contentWindow;
+        if (cw && guiRef.current && m.index === guiRef.current.index) cw.postMessage(m.data, '*');
+      } else if (m.type === 'guiClosed') {
+        guiRef.current = null;
+        setGui(null);
+      }
+    };
     const poll = setInterval(() => {
       const repl = strudelRef.current?.getRepl?.();
       const pattern = repl?.scheduler?.pattern;
@@ -50,32 +92,52 @@ export default function RackVizPanel({ strudelRef }) {
       if (found !== specRef.current) {
         if (specRef.current) setRackMeter(specRef.current, false);
         unsub?.();
+        subscribed = null;
         specRef.current = found;
         setSpec(found);
-        setInfo(found ? getRackInfo(found) : null);
         setLevels(null);
         notesRef.current = [];
         setNotes([]);
-        if (found) {
-          unsub = onRackEvent(found, (m) => {
-            if (m.type === 'ready') setInfo(m);
-            else if (m.type === 'levels') { levelsRef.current = m; setLevels(m); }
-            else if (m.type === 'note') {
-              const cur = notesRef.current.filter((n) => n.key !== m.key);
-              if (m.on) cur.push({ key: m.key, velocity: m.velocity });
-              notesRef.current = cur;
-              setNotes(cur);
-            }
-          });
-          setRackMeter(found, true, 16);
-        }
+        if (guiRef.current && found) { closeRackDeviceGui(found, guiRef.current.index); }
+        guiRef.current = null;
+        setGui(null);
+      }
+      if (!found) return;
+      const inf = getRackInfo(found);
+      if (inf && (!subscribed || subscribed.spec !== found || subscribed.info !== inf)) {
+        // node (re)created: subscribe and adopt its ready info
+        unsub?.();
+        subscribed = { spec: found, info: inf };
+        infoRef.current = inf;
+        setInfo(inf);
+        unsub = onRackEvent(found, handler(found));
+        setRackMeter(found, true, 16);
       }
     }, 500);
     return () => { clearInterval(poll); unsub?.(); if (specRef.current) setRackMeter(specRef.current, false); };
   }, [strudelRef]);
 
+  // iframe -> worklet: the page inside posts ArrayBuffers via window.parent.postMessage
+  useEffect(() => {
+    const onMsg = (e) => {
+      const g = guiRef.current;
+      if (!g || !iframeRef.current || e.source !== iframeRef.current.contentWindow) return;
+      if (e.data instanceof ArrayBuffer && specRef.current) sendRackGuiFrame(specRef.current, g.index, e.data);
+    };
+    window.addEventListener('message', onMsg);
+    return () => window.removeEventListener('message', onMsg);
+  }, []);
+
+  const openNative = async (index) => {
+    if (!spec) return;
+    if (guiRef.current && guiRef.current.index === index) { closeRackDeviceGui(spec, index); return; }
+    const r = await openRackDeviceGui(spec, index); // 'gui' message sets gui state via the subscription
+    if (!r?.ok) console.warn('[rack-viz] device gui open failed:', r?.detail);
+  };
+
   // rAF: waveform + pianoroll
   useEffect(() => {
+    if (collapsed) return;
     let raf = 0;
     const draw = () => {
       raf = requestAnimationFrame(draw);
@@ -128,7 +190,6 @@ export default function RackVizPanel({ strudelRef }) {
           const hi = Math.max(...midis, ...sounding) + 1;
           const yOf = (m) => rollY + rollH - ((m - lo) / (hi - lo)) * rollH;
           const xOf = (c) => ((c - (t - LOOKBEHIND)) / (LOOKAHEAD + LOOKBEHIND)) * w;
-          // sounding-now keys (worklet echo) as bright rows
           for (const n of notesRef.current) {
             ctx.fillStyle = 'rgba(255, 204, 0, 0.25)';
             ctx.fillRect(0, yOf(n.key) - 1, w, Math.max(2, rollH / (hi - lo)) - 2);
@@ -142,7 +203,6 @@ export default function RackVizPanel({ strudelRef }) {
             ctx.fillStyle = `rgba(117, 186, 255, ${Math.min(1, 0.25 + 0.6 * vel)})`;
             ctx.fillRect(x0, yOf(m), Math.max(1, x1 - x0), Math.max(2, rollH / (hi - lo)) - 2);
           }
-          // playhead
           ctx.fillStyle = '#ffcc00';
           ctx.fillRect(xOf(t), rollY, Math.max(1, dpr), rollH);
         }
@@ -150,7 +210,7 @@ export default function RackVizPanel({ strudelRef }) {
     };
     raf = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(raf);
-  }, [strudelRef, spec]);
+  }, [strudelRef, spec, collapsed]);
 
   const devices = info?.devices ?? [];
   const source = info?.source ?? null;
@@ -158,38 +218,65 @@ export default function RackVizPanel({ strudelRef }) {
   return (
     <div className="pad" style={{ marginTop: 8 }}>
       <div className="pad-toolbar">
+        <button className="mini" style={{ fontSize: 10, cursor: 'pointer', marginRight: 8 }} onClick={() => setCollapsed((c) => !c)}>
+          {collapsed ? '▸' : '▾'}
+        </button>
         <span className="pad-status">rack viz{ spec ? ` · ${spec.split('/').pop()}` : '' }</span>
       </div>
-      <canvas ref={canvasRef} style={{ width: '100%', height: 140, display: 'block', borderRadius: 6 }} />
-      {(devices.length > 0 || source) && (
-        <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 4 }}>
-          {source && (
-            <DeviceRow
-              key="src"
-              name={`${source.plugin} (source)`}
-              params={source.params}
-              level={levels?.source}
-              onParam={(id, v) => setRackParam(spec, -1, id, v)}
-            />
+      {!collapsed && (
+        <>
+          <canvas ref={canvasRef} style={{ width: '100%', height: 140, display: 'block', borderRadius: 6 }} />
+          {gui && (
+            <div style={{ marginTop: 6, border: '1px solid #2a2f3a', borderRadius: 6, overflow: 'hidden' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '3px 8px', background: '#171a20' }}>
+                <span style={{ flex: '1 1 auto', fontSize: 11, color: '#9aa4b2' }}>
+                  device {gui.index === -1 ? 'source' : gui.index} native view
+                </span>
+                <button className="mini" style={{ fontSize: 10, cursor: 'pointer' }} onClick={() => spec && closeRackDeviceGui(spec, gui.index)}>close ×</button>
+              </div>
+              <iframe
+                ref={iframeRef}
+                src={gui.url}
+                title={`rack device ${gui.index}`}
+                style={{ width: '100%', height: 320, border: 0, display: 'block', background: '#111012' }}
+              />
+            </div>
           )}
-          {devices.map((d) => (
-            <DeviceRow
-              key={d.index}
-              name={d.plugin ?? `device ${d.index}`}
-              bypassed={d.bypassed || (levels && !levels.devices.find((x) => x.index === d.index)?.on)}
-              params={d.params}
-              level={levels?.devices?.find((x) => x.index === d.index)}
-              onParam={(id, v) => setRackParam(spec, d.index, id, v)}
-              onToggle={(on) => setRackDeviceOn(spec, d.index, on)}
-            />
-          ))}
-        </div>
+          {(devices.length > 0 || source) && (
+            <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {source && (
+                <DeviceRow
+                  key="src"
+                  name={`${source.plugin} (source)`}
+                  params={source.params}
+                  level={levels?.source}
+                  onParam={(id, v) => setRackParam(spec, -1, id, v)}
+                  onView={() => openNative(-1)}
+                  viewOpen={gui?.index === -1}
+                />
+              )}
+              {devices.map((d) => (
+                <DeviceRow
+                  key={d.index}
+                  name={d.plugin ?? `device ${d.index}`}
+                  bypassed={d.bypassed || (levels && !levels.devices.find((x) => x.index === d.index)?.on)}
+                  params={d.params}
+                  level={levels?.devices?.find((x) => x.index === d.index)}
+                  onParam={(id, v) => setRackParam(spec, d.index, id, v)}
+                  onToggle={(on) => setRackDeviceOn(spec, d.index, on)}
+                  onView={() => openNative(d.index)}
+                  viewOpen={gui?.index === d.index}
+                />
+              ))}
+            </div>
+          )}
+        </>
       )}
     </div>
   );
 }
 
-function DeviceRow({ name, params = [], level, bypassed, onParam, onToggle }) {
+function DeviceRow({ name, params = [], level, bypassed, onParam, onToggle, onView, viewOpen }) {
   const [vals, setVals] = useState({});
   const lvl = level ? Math.max(level.peak, level.rms * 2) : 0;
   return (
@@ -199,6 +286,11 @@ function DeviceRow({ name, params = [], level, bypassed, onParam, onToggle }) {
         <span style={{ flex: '0 0 80px', height: 6, background: '#1c2027', borderRadius: 3, overflow: 'hidden' }}>
           <span style={{ display: 'block', height: '100%', width: `${Math.min(100, lvl * 100)}%`, background: '#75baff' }} />
         </span>
+        {onView && (
+          <button className="mini" style={{ fontSize: 10, cursor: 'pointer', borderColor: viewOpen ? '#75baff' : undefined }} onClick={onView}>
+            {viewOpen ? 'viewing' : 'view'}
+          </button>
+        )}
         {onToggle && (
           <button className="mini" style={{ fontSize: 10, cursor: 'pointer' }} onClick={() => onToggle(bypassed)}>
             {bypassed ? 'off' : 'on'}

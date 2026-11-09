@@ -47,7 +47,7 @@ export async function loadRackBundle(spec) {
   for (const [key, entry] of Object.entries(manifest)) bundles[key] = get(entry.path);
   const { errors } = await validateRackBundle(rack, manifest, bundles);
   if (errors.length) throw new Error('[strudel-rack] invalid rack bundle: ' + errors.join('; '));
-  const out = { rack, bundles };
+  const out = { rack, bundles, files }; // files: the whole untarred archive, for serving a device's ui/ page
   bundleCache.set(url, out);
   return out;
 }
@@ -154,6 +154,87 @@ export function setRackDeviceOn(rackSpec, deviceIndex, on) {
 /** Turn level metering on/off (posts {type:'levels'} every `every` blocks while on). */
 export function setRackMeter(rackSpec, on, every = 16) {
 	sendRackMessage(rackSpec, { type: 'meter', on, every });
+}
+
+// ── a device's own editor page (the plugin's "native" view, in an iframe) ──────
+//
+// The worklet relays clap.webview frames between the guest and the page; the page here loads the
+// bundle's ui files into an iframe served by the app's /wclap-sw.js service worker under
+// /__wclap__/<prefix>/… and shuttles ArrayBuffers across the iframe boundary with postMessage.
+
+const pendingGui = new Map(); // `${spec}|${index}` -> resolve
+
+/** Open device `index` (-1 = source) editor page in the worklet; resolves with the worklet's
+    { ok, uri, width, height } 'gui' message. */
+export function openRackDeviceGui(rackSpec, index) {
+	const entry = nodeCache.get(String(rackSpec));
+	if (!entry) return Promise.resolve({ ok: false, detail: 'rack not loaded' });
+	const key = `${String(rackSpec)}|${index}`;
+	return new Promise((resolve) => {
+		pendingGui.set(key, resolve);
+		entry.node.port.postMessage({ type: 'guiOpen', index });
+		setTimeout(() => { if (pendingGui.delete(key)) resolve({ ok: false, detail: 'timeout' }); }, 8000);
+	});
+}
+
+/** page -> guest frame (from the iframe). `data` is an ArrayBuffer. */
+export function sendRackGuiFrame(rackSpec, index, data) {
+	sendRackMessage(rackSpec, { type: 'guiReceive', index, data });
+}
+
+/** Close the device's editor page in the worklet. */
+export function closeRackDeviceGui(rackSpec, index) {
+	sendRackMessage(rackSpec, { type: 'guiClose', index });
+}
+
+/** Dispatch worklet 'gui'/'guiFrame'/'guiClosed' messages to any pending openRackDeviceGui caller;
+    call this from an onRackEvent subscription. Returns the message (for guiFrame forwarding). */
+export function handleRackGuiMessage(rackSpec, m) {
+	if (m.type === 'gui') {
+		const key = `${String(rackSpec)}|${m.index}`;
+		const resolve = pendingGui.get(key);
+		if (resolve) { pendingGui.delete(key); resolve(m); }
+	}
+	return m;
+}
+
+const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.png': 'image/png', '.jpg': 'image/jpeg', '.svg': 'image/svg+xml', '.json': 'application/json', '.wasm': 'application/wasm', '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.ico': 'image/x-icon' };
+const mimeFor = (name) => MIME[name.slice(name.lastIndexOf('.')).toLowerCase()] ?? 'application/octet-stream';
+
+/** The parsed rack document of a loaded rack (for device bundle keys), or null. */
+export function getRack(rackSpec) {
+	return nodeCache.get(String(rackSpec))?.rack ?? null;
+}
+
+/** The untarred archive files of a loaded rack (name -> bytes), or null. */
+export function getRackFiles(rackSpec) {
+	return bundleCache.get(String(rackSpec))?.files ?? null;
+}
+
+/** Serve one bundle's ui files to the app's /wclap-sw.js service worker and return the URL prefix
+    (e.g. "/__wclap__/…/wet-chorus") the iframe should load the guest's uri under. Null when no SW.
+    The rack archive packs each WCLAP bundle as a flat `<key>.wclap.tar.gz`; its inner entries carry
+    a `<key>.wclap/` prefix, which is stripped here. Async (it untars the inner bundle). */
+export async function serveRackBundleUi(rackSpec, bundleKey) {
+	const files = bundleCache.get(String(rackSpec))?.files; // the archive map lives in bundleCache
+	const sw = navigator.serviceWorker?.controller;
+	if (!files || !sw) return null;
+	const prefix = `__wclap__/${encodeURIComponent(String(rackSpec)).replace(/[^a-zA-Z0-9]/g, '_')}/${encodeURIComponent(String(bundleKey)).replace(/[^a-zA-Z0-9]/g, '_')}`;
+	const esc = bundleKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+	const archiveRe = new RegExp(`(?:^|/)${esc}\\.wclap\\.tar\\.gz$`);
+	const innerPrefixRe = new RegExp(`(?:^|/)${esc}\\.wclap/`);
+	const out = {};
+	for (const [name, bytes] of Object.entries(files)) {
+		if (!archiveRe.test(name)) continue;
+		const inner = await untarArchiveAsync(bytes);
+		for (const [n2, b2] of Object.entries(inner)) {
+			const rel = n2.replace(innerPrefixRe, '');
+			if (rel) out[rel] = { mime: mimeFor(n2), data: b2 };
+		}
+	}
+	if (!Object.keys(out).length) return null;
+	sw.postMessage({ type: 'wclapFiles', prefix, files: out });
+	return `/${prefix}`;
 }
 
 /** One hap's voice: superdough's { node, nodes, stop } contract. */

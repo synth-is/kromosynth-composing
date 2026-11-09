@@ -220,9 +220,10 @@ export class WclapHost {
 			stateMarkDirty: 'vI',
 			inSize: 'II', inGet: 'III', outTryPush: 'III',
 			streamWrite: 'LIIL', streamRead: 'LIIL',
+			webviewSend: 'IIII',
 		}, {
 			getExtension: (host, idPtr) => this.hostExtensions[this.cString(idPtr)] ?? 0,
-			requestRestart() {}, requestProcess() {}, requestCallback() {},
+			requestRestart() {}, requestProcess() {}, requestCallback() { this.callbackWanted = true; },
 			paramsRescan() {}, paramsClear() {}, paramsRequestFlush() {}, stateMarkDirty() {},
 			inSize: () => this.inputEvents.length,
 			inGet: (list, i) => this.inputEvents[i] ?? 0,
@@ -242,12 +243,23 @@ export class WclapHost {
 				this.stream.pos += n;
 				return BigInt(n);
 			},
+			// clap_host_webview.send: the guest pushes one binary frame to its editor page.
+			// The sink is set by the embedder while a device gui is open (webviewSink).
+			webviewSend: (host, buf, size) => {
+				if (!this.webviewSink) return 0;   // per the extension: fail while no page is open
+				const n = Number(size);
+				this.webviewSink(this.bytes().slice(buf, buf + n));
+				return 1;
+			},
 		});
 		this.hostFns = hf;
 		this.hostExtensions = {
 			'clap.params': this._makeStruct([hf.paramsRescan, hf.paramsClear, hf.paramsRequestFlush]),
 			'clap.state': this._makeStruct([hf.stateMarkDirty]),
+			'clap.webview/3': this._makeStruct([hf.webviewSend]), // CLAP_EXT_WEBVIEW in this clap version
 		};
+		this.webviewSink = null;    // set while a device's webview gui is open
+		this.callbackWanted = false;
 		const host = this.malloc(48);
 		this.setU32(host, 1); this.setU32(host + 4, 2); this.setU32(host + 8, 7);
 		[this.allocString('wclap-host-node'), this.allocString('kromosynth'), this.allocString(''), this.allocString('0.1.0')]
@@ -298,6 +310,9 @@ export class WclapPlugin {
 		this.stateExt = this.ext('clap.state');
 		this.latencyExt = this.ext('clap.latency');
 		this.tailExt = this.ext('clap.tail');
+		this.guiExt = this.ext('clap.gui');
+		this.webviewExt = this.ext('clap.webview/3');
+		this.guiCreated = false;
 		const ports = this.ext('clap.audio-ports');
 		const portInfo = (isInput, i) => {
 			const info = h.malloc(280);
@@ -472,6 +487,51 @@ export class WclapPlugin {
 		}
 		return out;
 	}
+
+	// ── clap.gui (webview api) + clap.webview: the plugin's own editor page, relayed by the host ──
+	// vtable offsets: clap_plugin_gui { is_api_supported@0, get_preferred_api@4, create@8, destroy@12,
+	// get_size@20 }; clap_plugin_webview { get_uri@0, get_resource@4, receive@8 }.
+
+	/** Open the guest's editor in the "webview" api (no native window). Returns { uri, width, height } or null. */
+	guiOpenWebview() {
+		const h = this.h;
+		if (!this.guiExt || !this.webviewExt) return null;
+		const api = h.allocString('webview');
+		const okApi = h.fn(h.u32(this.guiExt + 0))(this.ptr, api, 0);
+		const okCreate = okApi && h.fn(h.u32(this.guiExt + 8))(this.ptr, api, 0);
+		h.free(api);
+		if (!okCreate) return null;
+		this.guiCreated = true;
+		const len = h.fn(h.u32(this.webviewExt + 0))(this.ptr, 0, 0);
+		const buf = h.malloc(Math.max(1, len | 0));
+		h.fn(h.u32(this.webviewExt + 0))(this.ptr, buf, Math.max(1, len | 0));
+		const uri = h.cString(buf);
+		h.free(buf);
+		let width = 0, height = 0;
+		const size = h.malloc(8);
+		if (h.fn(h.u32(this.guiExt + 20))(this.ptr, size, size + 4)) { width = h.u32(size); height = h.u32(size + 4); }
+		h.free(size);
+		return { uri, width, height };
+	}
+
+	guiCloseWebview() {
+		if (this.guiExt && this.guiCreated) this.h.fn(this.h.u32(this.guiExt + 12))(this.ptr);
+		this.guiCreated = false;
+	}
+
+	/** page -> guest: one binary frame from the editor page. */
+	guiReceive(bytes) {
+		const h = this.h;
+		if (!this.webviewExt || !this.guiCreated || !bytes?.length) return false;
+		const buf = h.malloc(bytes.length);
+		h.bytes().set(bytes, buf);
+		const ok = h.fn(h.u32(this.webviewExt + 8))(this.ptr, buf, bytes.length);
+		h.free(buf);
+		return !!ok;
+	}
+
+	/** clap_plugin.on_main_thread (vtable offset 44) — the guest's page updates are pumped through here. */
+	onMainThread() { if (this.guiCreated) this.call(44); }
 
 	/** clap.latency: the plugin's reported latency in frames. 0 when the extension is absent; UINT32_MAX -> Infinity. */
 	latency() {

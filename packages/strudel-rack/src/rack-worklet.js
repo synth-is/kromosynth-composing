@@ -18,6 +18,7 @@ class RackProcessor extends AudioWorkletProcessor {
 		this.ready = false;
 		this.meterEvery = 0; // level-meter posting interval, 0 = off (see {type:'meter'})
 		this.meterCount = 0;
+		this.guiDevice = null; // device index whose editor page is open (webview relay), -1 = source
 		this.port.onmessage = (e) => { void this.onmsg(e.data); };
 	}
 
@@ -35,7 +36,7 @@ class RackProcessor extends AudioWorkletProcessor {
 				const events = Object.entries(s.params ?? {}).map(([k, v]) => ({
 					frame: 0, type: 'param', id: plugin.param(isNaN(Number(k)) ? k : Number(k))?.id ?? k, value: v,
 				}));
-				this.source = { plugin, events, first: true, pending: [], params: plugin.params.map((p) => ({ id: p.id, name: p.name, min: p.min, max: p.max, def: p.def, stepped: p.stepped })) };
+				this.source = { plugin, host, events, first: true, pending: [], params: plugin.params.map((p) => ({ id: p.id, name: p.name, min: p.min, max: p.max, def: p.def, stepped: p.stepped })) };
 			}
 			for (const [i, d] of rack.devices.entries()) {
 				if (d.on === false) { this.devices.push({ index: i, on: false }); continue; }
@@ -55,7 +56,7 @@ class RackProcessor extends AudioWorkletProcessor {
 					frame: 0, type: 'param', id: plugin.param(isNaN(Number(k)) ? k : Number(k))?.id ?? k, value: v,
 				}));
 				this.devices.push({
-					index: i, on: true, plugin, events, first: true, pending: null,
+					index: i, on: true, plugin, host, events, first: true, pending: null,
 					latency: 0,
 				});
 			}
@@ -97,6 +98,47 @@ class RackProcessor extends AudioWorkletProcessor {
 			this.meterEvery = m.on ? (m.every || 16) : 0;
 			this.meterCount = 0;
 		}
+		// one device's own editor page (clap.gui webview api), relayed page <-> guest as binary frames.
+		// index -1 = the source. Only one at a time, like the Synth.is plugin's overlay.
+		if (m.type === 'guiOpen' || m.type === 'guiReceive' || m.type === 'guiClose') {
+			const t = m.index === -1 ? this.source : this.devices[m.index];
+			if (!t || !t.plugin) {
+				this.port.postMessage({ type: 'gui', index: m.index, ok: false, detail: 'no such device' });
+				return;
+			}
+			if (m.type === 'guiOpen') {
+				if (this.guiDevice != null) this.closeGui();
+				const info = t.plugin.guiOpenWebview();
+				if (!info) {
+					this.port.postMessage({ type: 'gui', index: m.index, ok: false, detail: 'guest has no clap.gui webview api / clap.webview' });
+					return;
+				}
+				this.guiDevice = m.index;
+				t.host.webviewSink = (bytes) => {
+					const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+					this.port.postMessage({ type: 'guiFrame', index: m.index, data: ab }, [ab]);
+				};
+				t.plugin.onMainThread();
+				this.port.postMessage({ type: 'gui', index: m.index, ok: true, uri: info.uri, width: info.width, height: info.height });
+			} else if (m.type === 'guiReceive') {
+				if (this.guiDevice === m.index) {
+					t.plugin.guiReceive(new Uint8Array(m.data));
+					t.plugin.onMainThread();
+				}
+			} else {
+				if (this.guiDevice === m.index) this.closeGui();
+				this.port.postMessage({ type: 'guiClosed', index: m.index });
+			}
+		}
+	}
+
+	closeGui() {
+		const t = this.guiDevice === -1 ? this.source : this.devices[this.guiDevice];
+		if (t?.plugin) {
+			t.plugin.guiCloseWebview();
+			if (t.host) t.host.webviewSink = null;
+		}
+		this.guiDevice = null;
 	}
 
 	process(inputs, outputs) {
@@ -181,6 +223,11 @@ class RackProcessor extends AudioWorkletProcessor {
 			});
 			if (levels) for (const a of levels) { a.peak = 0; a.sum = 0; a.n = 0; }
 			if (srcLevels) { srcLevels.peak = 0; srcLevels.sum = 0; srcLevels.n = 0; }
+		}
+		if (this.guiDevice != null) {
+			const t = this.guiDevice === -1 ? this.source : this.devices[this.guiDevice];
+			if (t?.plugin?.guiCreated) t.plugin.onMainThread();
+			if (t?.host?.callbackWanted) t.host.callbackWanted = false;
 		}
 		output[0].set(l);
 		if (output[1]) output[1].set(r);

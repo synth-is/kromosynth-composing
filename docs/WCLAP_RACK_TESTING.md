@@ -126,6 +126,24 @@ pass a named canvas's 2d context as `ctx` to render into a panel instead of the 
 Verified 2026-11-09 in the browser: panel shows the rack name, waveform pixels + pianoroll pixels
 non-zero while playing, 118 param sliders across aether/wet-chorus/pearls, level bars at 3-7%.
 
+### Device native view in the panel (2026-11-09, latest)
+
+Each device row has a **view** button that opens the plugin's OWN editor page (the same webview UI the
+Synth.is plugin shows) in an iframe inside the panel, one device at a time, with a "close ×" button.
+The page files (index.html + resource/*) are untarred from the rack bundle in the page and served by
+`public/wclap-sw.js` under `/__wclap__/<prefix>/<bundleKey>/…`; frames relay page <-> worklet over
+clap.webview (`guiOpen`/`guiReceive`/`guiClose` messages, `guiFrame` back). The whole panel also
+collapses to its toolbar line (▸/▾) — handy with several racks. strudel-rack exports for this:
+`openRackDeviceGui`, `sendRackGuiFrame`, `closeRackDeviceGui`, `handleRackGuiMessage`, `getRack`,
+`getRackFiles`, `serveRackBundleUi`. The reference host (wclap-rack repo) grew the matching
+clap.webview/3 host extension + `guiOpenWebview/guiReceive/onMainThread` on the plugin side.
+
+Verified 2026-11-09 in the browser: clicking view on WetChorus loads title "WetChorus", canvas 960 px
+wide, ~613k painted pixels (guest status frames flowing), 301 guiFrames during a slider move; the
+panel's 118 param sliders drive the guest via `param` messages. Note: vite caches linked `file:`
+packages — restart `npm run start` after editing packages/strudel-rack, and if the SW misbehaves,
+unregister it (DevTools) once; `wclap-sw.js` keys must not be double-prefixed.
+
 **Locally** (dev server), serve a rack bundle and use its URL, or the self-contained test page:
 
 ```sh
