@@ -129,6 +129,11 @@ export default defineConfig({
   server: {
     host: true,
     port: 5273, // distinct from kromosynth-desktop's default (5173)
+    // The live api.synth.is CORS allowlist includes http://localhost:5273 only. Without
+    // strictPort, a second instance silently falls back to 5274 and every sidebar fetch
+    // is then rejected by the backend (HTTP 500, no Access-Control-Allow-Origin) — fail
+    // loudly at startup instead.
+    strictPort: true,
     fs: {
       // The sibling kromosynth package (aliased below) lives outside the Vite root.
       allow: ['..', KROMOSYNTH_DIR],

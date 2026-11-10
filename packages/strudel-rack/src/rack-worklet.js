@@ -7,8 +7,13 @@
 // Realtime semantics per SPEC.md §3: no frames are dropped; the summed latency is reported to the
 // page (a DAW host would compensate it upward).
 import { WclapHost } from './vendor/wclap-rack/index.mjs';
+import { resolveLfoCfg, resolveEnvCfg, modulatedParamValue } from './modulate.js';
 
 const B = 128; // RenderQuantum
+
+// resolve a rack.json param key or a page-sent param id to the numeric CLAP param id
+// (names and "module/name" paths pass through plugin.param; unknown ids stay as-is).
+const pidOf = (plugin, idOrName) => plugin.param(isNaN(Number(idOrName)) ? idOrName : Number(idOrName))?.id ?? idOrName;
 
 class RackProcessor extends AudioWorkletProcessor {
 	constructor() {
@@ -19,7 +24,33 @@ class RackProcessor extends AudioWorkletProcessor {
 		this.meterEvery = 0; // level-meter posting interval, 0 = off (see {type:'meter'})
 		this.meterCount = 0;
 		this.guiDevice = null; // device index whose editor page is open (webview relay), -1 = source
+		// rack parameter state for Strudel-driven modulation (see .rp()/.lfo()/.env() in index.js):
+		// paramBase/paramMeta keyed `${index}:${pid}` (index -1 = source); active modulators
+		// keyed `${index}:${pid}:${key}`, each { kind:'lfo'|'env', index, pid, at, off, cfg }
+		// with cfg from resolveLfoCfg/resolveEnvCfg.
+		this.paramBase = new Map();
+		this.paramMeta = new Map();
+		this.mods = new Map();
+		this._lastParamPost = new Map(); // `${index}:${pid}` -> last value pushed to the page (for diffing)
 		this.port.onmessage = (e) => { void this.onmsg(e.data); };
+	}
+
+	/** Register one plugin's params into paramBase/paramMeta and return its resolved initial events. */
+	_initParams(index, plugin, paramsObj) {
+		for (const p of plugin.params) {
+			const key = `${index}:${p.id}`;
+			this.paramMeta.set(key, { min: p.min, max: p.max });
+			this.paramBase.set(key, p.def);
+		}
+		return Object.entries(paramsObj ?? {}).map(([k, v]) => {
+			const pid = pidOf(plugin, k);
+			const key = `${index}:${pid}`;
+			const meta = this.paramMeta.get(key);
+			let value = Number(v);
+			if (meta && Number.isFinite(meta.min) && Number.isFinite(meta.max)) value = Math.min(meta.max, Math.max(meta.min, value));
+			this.paramBase.set(key, value);
+			return { frame: 0, type: 'param', id: pid, value };
+		});
 	}
 
 	async onmsg(m) {
@@ -33,9 +64,7 @@ class RackProcessor extends AudioWorkletProcessor {
 				const plugin = host.createPlugin(s.plugin);
 				plugin.activate({ sampleRate, blockSize: B });
 				if (s.state) plugin.loadState(Uint8Array.from(atob(s.state), (c) => c.charCodeAt(0)));
-				const events = Object.entries(s.params ?? {}).map(([k, v]) => ({
-					frame: 0, type: 'param', id: plugin.param(isNaN(Number(k)) ? k : Number(k))?.id ?? k, value: v,
-				}));
+				const events = this._initParams(-1, plugin, s.params);
 				this.source = { plugin, host, events, first: true, pending: [], params: plugin.params.map((p) => ({ id: p.id, name: p.name, min: p.min, max: p.max, def: p.def, stepped: p.stepped })) };
 			}
 			for (const [i, d] of rack.devices.entries()) {
@@ -52,9 +81,7 @@ class RackProcessor extends AudioWorkletProcessor {
 				const plugin = host.createPlugin(d.plugin);
 				plugin.activate({ sampleRate, blockSize: B });
 				if (d.state) plugin.loadState(Uint8Array.from(atob(d.state), (c) => c.charCodeAt(0)));
-				const events = Object.entries(d.params ?? {}).map(([k, v]) => ({
-					frame: 0, type: 'param', id: plugin.param(isNaN(Number(k)) ? k : Number(k))?.id ?? k, value: v,
-				}));
+				const events = this._initParams(i, plugin, d.params);
 				this.devices.push({
 					index: i, on: true, plugin, host, events, first: true, pending: null,
 					latency: 0,
@@ -81,12 +108,70 @@ class RackProcessor extends AudioWorkletProcessor {
 			this.port.postMessage({ type: 'note', on: m.on, key: m.key, velocity: m.velocity ?? 0.8 });
 		}
 		if (m.type === 'param') {
-			if (m.index === -1 && this.source) {
-				this.source.pending.push({ frame: 0, type: 'param', id: m.id, value: m.value });
-			} else {
-				const d = this.devices[m.index];
-				if (d?.on) d.pending = [...(d.pending ?? []), { frame: 0, type: 'param', id: m.id, value: m.value }];
+			const t = m.index === -1 ? this.source : this.devices[m.index];
+			if (!t) { this.port.postMessage({ type: 'paramError', index: m.index, id: m.id, detail: 'no such device' }); return; }
+			if (!t.plugin) return; // bypassed device: no plugin instance, nothing to set
+			const pid = pidOf(t.plugin, m.id);
+			if (t.plugin.param(pid) == null) {
+				// never let a bad param id reach render() — this.param(ev.id).id would throw
+				// inside process() and kill the whole audio thread
+				this.port.postMessage({ type: 'paramError', index: m.index, id: m.id });
+				return;
 			}
+			const key = `${m.index}:${pid}`;
+			const meta = this.paramMeta.get(key);
+			let value = Number(m.value);
+			if (!Number.isFinite(value)) { this.port.postMessage({ type: 'paramError', index: m.index, id: m.id, detail: 'non-numeric' }); return; }
+			if (meta && Number.isFinite(meta.min) && Number.isFinite(meta.max)) value = Math.min(meta.max, Math.max(meta.min, value));
+			this.paramBase.set(key, value);
+			this._injectParam(m.index, pid, this._modulated(key));
+			// echo the applied value back so the viz sliders track code/slider changes
+			this._postParamValue(m.index, pid, t.plugin);
+		}
+		// Strudel .lfo()/.env() on a rack param: { type:'paramLfo'|'paramEnv', op:'add'|'remove',
+		//   index, id, key, at, off?, …cfg fields } — `at`/`off` are audio-clock seconds; the
+		// modulator contributes from `at` until `off`. paramEnv adds susTime (note length in s).
+		if (m.type === 'paramLfo' || m.type === 'paramEnv') {
+			const kind = m.type === 'paramEnv' ? 'env' : 'lfo';
+			const t = m.index === -1 ? this.source : this.devices[m.index];
+			if (!t) { this.port.postMessage({ type: 'paramError', index: m.index, id: m.id, via: m.type, detail: 'no such device' }); return; }
+			if (!t.plugin) return; // bypassed device
+			const pid = pidOf(t.plugin, m.id);
+			if (t.plugin.param(pid) == null) {
+				this.port.postMessage({ type: 'paramError', index: m.index, id: m.id, via: m.type });
+				return;
+			}
+			const key = `${m.index}:${pid}:${m.key}`;
+			if (m.op === 'remove') {
+				const existing = this.mods.get(key);
+				if (existing && m.off != null && currentTime < m.off) {
+					// deferred: keep contributing until `off`; _applyMods prunes it there and restores base
+					existing.off = m.off;
+					this.port.postMessage({ type: kind, op: 'off', index: m.index, id: m.id, key: m.key, active: this._modsFor(`${m.index}:${pid}`).length });
+				} else {
+					this.mods.delete(key);
+					this.port.postMessage({ type: kind, op: 'remove', index: m.index, id: m.id, key: m.key, active: this._modsFor(`${m.index}:${pid}`).length });
+					this._injectParam(m.index, pid, this._modulated(`${m.index}:${pid}`)); // restore base (plus remaining mods)
+				}
+			} else {
+				const base = this.paramBase.get(`${m.index}:${pid}`);
+				const cfg = kind === 'env'
+					? resolveEnvCfg(m, { base, susTime: m.susTime ?? 0 })
+					: resolveLfoCfg(m, { cps: m.cps ?? 1, base });
+				this.mods.set(key, { kind, index: m.index, pid, at: m.at ?? 0, off: m.off ?? null, cfg });
+				this.port.postMessage({ type: kind, op: 'add', index: m.index, id: m.id, key: m.key, active: this._modsFor(`${m.index}:${pid}`).length, cfg });
+			}
+		}
+		// debug/viz query: reply { type:'paramValue', index, id, base, value, lfos } with the
+		// param's base and its current modulated value (base + active LFOs)
+		if (m.type === 'paramQuery') {
+			const t = m.index === -1 ? this.source : this.devices[m.index];
+			const pid = t?.plugin ? pidOf(t.plugin, m.id) : null;
+			if (!t?.plugin || pid == null || t.plugin.param(pid) == null) {
+				this.port.postMessage({ type: 'paramError', index: m.index, id: m.id, via: 'paramQuery' });
+				return;
+			}
+			this._postParamValue(m.index, pid, t.plugin);
 		}
 		if (m.type === 'setOn') {
 			const d = this.devices[m.index];
@@ -141,6 +226,90 @@ class RackProcessor extends AudioWorkletProcessor {
 		this.guiDevice = null;
 	}
 
+	// ── rack parameter modulation (Strudel .rp() + .lfo()/.env()) ────────────
+
+	/** Push one param's current state to the page: { type:'paramValue', index, id, name, base, value, mods }.
+	    Doubles as the reply to a page `paramQuery` and as a change notification (viz sliders). */
+	_postParamValue(index, pid, plugin, now = currentTime) {
+		const key = `${index}:${pid}`;
+		const p = plugin?.param(pid);
+		const mods = this._modsFor(key).filter((l) => now >= l.at && (l.off == null || now < l.off)).length;
+		const value = this._modulated(key, now);
+		this._lastParamPost.set(key, value);
+		this.port.postMessage({
+			type: 'paramValue', index, id: pid, name: p?.name ?? String(pid),
+			base: this.paramBase.get(key) ?? null, value, mods,
+		});
+	}
+
+	/** Values to push on a meter tick: every param with an active modulator (LFOs move every
+	    block, so always send those) plus any param whose value changed since the last push. */
+	_collectParamValues(now = currentTime) {
+		const out = [];
+		const consider = (index, plugin) => {
+			for (const p of plugin.params) {
+				const key = `${index}:${p.id}`;
+				const mods = this._modsFor(key).filter((l) => now >= l.at && (l.off == null || now < l.off)).length;
+				const value = this._modulated(key, now);
+				if (mods > 0 || this._lastParamPost.get(key) !== value) {
+					this._lastParamPost.set(key, value);
+					out.push({ index, id: p.id, name: p.name, value, mods });
+				}
+			}
+		};
+		if (this.source?.plugin) consider(-1, this.source.plugin);
+		for (const d of this.devices) if (d.on && d.plugin) consider(d.index, d.plugin);
+		return out;
+	}
+
+	_modsFor(paramKey) {
+		const out = [];
+		for (const l of this.mods.values()) if (`${l.index}:${l.pid}` === paramKey) out.push(l);
+		return out;
+	}
+
+	/** base + Σ active modulator outputs right now, clamped to the param's declared range. */
+	_modulated(paramKey, now = currentTime) {
+		const active = this._modsFor(paramKey)
+			.filter((l) => now >= l.at && (l.off == null || now < l.off))
+			.map((l) => ({ cfg: l.cfg, t: now - l.at }));
+		return modulatedParamValue(this.paramBase.get(paramKey) ?? 0, this.paramMeta.get(paramKey) ?? null, active);
+	}
+
+	/** Queue one param event on the device's (or source's) pending list for the next block. */
+	_injectParam(index, pid, value) {
+		const t = index === -1 ? this.source : this.devices[index];
+		if (!t || !t.plugin || t.on === false) return;
+		const ev = { frame: 0, type: 'param', id: pid, value };
+		if (index === -1) t.pending.push(ev);
+		else t.pending = [...(t.pending ?? []), ev];
+	}
+
+	/** Append one param event per modulated param to the pending lists; called once per block.
+	    Also prunes modulators whose `off` has passed and restores those params to base. */
+	_applyMods(now = currentTime) {
+		const expired = new Set(); // `${index}:${pid}` whose last modulator just ended
+		for (const [k, l] of [...this.mods]) {
+			if (l.off != null && now >= l.off) { this.mods.delete(k); expired.add(`${l.index}:${l.pid}`); }
+		}
+		const groups = new Map(); // `${index}:${pid}` -> [{ cfg, t }]
+		for (const l of this.mods.values()) {
+			if (now < l.at) continue;
+			const key = `${l.index}:${l.pid}`;
+			if (!groups.has(key)) groups.set(key, []);
+			groups.get(key).push({ cfg: l.cfg, t: now - l.at });
+		}
+		for (const key of expired) if (!groups.has(key)) groups.set(key, []); // restore base
+		for (const [key, entries] of groups) {
+			const sep = key.indexOf(':');
+			const index = Number(key.slice(0, sep));
+			const pidStr = key.slice(sep + 1);
+			const pid = isNaN(Number(pidStr)) ? pidStr : Number(pidStr);
+			const v = modulatedParamValue(this.paramBase.get(key) ?? 0, this.paramMeta.get(key) ?? null, entries);
+			this._injectParam(index, pid, v);
+		}
+	}
+
 	process(inputs, outputs) {
 		try {
 			return this._process(inputs, outputs);
@@ -164,6 +333,10 @@ class RackProcessor extends AudioWorkletProcessor {
 	_process(inputs, outputs) {
 		const input = inputs[0], output = outputs[0];
 		if (!this.ready) return true;
+		// Strudel-driven param modulators (.lfo()/.env()): one param event per modulated param
+		// per block (128 frames is plenty for LFO/env-rate modulation; CLAP plugins smooth
+		// param changes internally anyway)
+		if (this.mods.size) this._applyMods();
 		// meter scratch, allocated once per block: per-device peak/rms accumulated over the interval
 		const meter = this.meterEvery > 0;
 		const levels = meter ? this.devices.map(() => ({ peak: 0, sum: 0, n: 0 })) : null;
@@ -221,6 +394,9 @@ class RackProcessor extends AudioWorkletProcessor {
 					return { index: d.index, on: !!d.on, peak: a ? a.peak : 0, rms: a ? rms(a) : 0 };
 				}),
 			});
+			// live param values for the viz sliders: modulated params every tick, others on change
+			const paramValues = this._collectParamValues();
+			if (paramValues.length) this.port.postMessage({ type: 'paramValues', values: paramValues });
 			if (levels) for (const a of levels) { a.peak = 0; a.sum = 0; a.n = 0; }
 			if (srcLevels) { srcLevels.peak = 0; srcLevels.sum = 0; srcLevels.n = 0; }
 		}

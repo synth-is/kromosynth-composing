@@ -33,6 +33,7 @@ export default function RackVizPanel({ strudelRef }) {
   const [spec, setSpec] = useState(null);       // active rack URL
   const [info, setInfo] = useState(null);       // worklet `ready` message
   const [levels, setLevels] = useState(null);   // latest `levels` message
+  const [paramVals, setParamVals] = useState({}); // live param values from the worklet: { [index]: { [pid]: { value, mods } } }
   const [notes, setNotes] = useState([]);       // echoed note on/off events (sounding now)
   const [collapsed, setCollapsed] = useState(false);
   const [gui, setGui] = useState(null);         // { index, url } when a device's native view is open
@@ -40,6 +41,7 @@ export default function RackVizPanel({ strudelRef }) {
   const guiRef = useRef(null);
   const levelsRef = useRef(null);
   const notesRef = useRef([]);
+  const paramValsRef = useRef({});
 
   // find the rack the current pattern is playing, and subscribe to its worklet. The node is
   // created asynchronously (fetch + wasm compile), so the subscription is (re)made whenever the
@@ -52,6 +54,20 @@ export default function RackVizPanel({ strudelRef }) {
       handleRackGuiMessage(found, m);
       if (m.type === 'ready') { infoRef.current = m; setInfo(m); }
       else if (m.type === 'levels') { levelsRef.current = m; setLevels(m); }
+      else if (m.type === 'paramValue' || m.type === 'paramValues') {
+        // live param values from the worklet — sliders track .rp()/.lfo()/.env() changes
+        // from the code (and echo slider drags back, clamped)
+        const entries = m.type === 'paramValues' ? m.values : [m];
+        const next = { ...paramValsRef.current };
+        for (const e of entries) {
+          if (e.index == null || e.id == null || !Number.isFinite(e.value)) continue;
+          const slot = { ...(next[String(e.index)] ?? {}) };
+          slot[e.id] = { value: e.value, mods: e.mods ?? 0 };
+          next[String(e.index)] = slot;
+        }
+        paramValsRef.current = next;
+        setParamVals(next);
+      }
       else if (m.type === 'note') {
         const cur = notesRef.current.filter((n) => n.key !== m.key);
         if (m.on) cur.push({ key: m.key, velocity: m.velocity });
@@ -98,6 +114,8 @@ export default function RackVizPanel({ strudelRef }) {
         specRef.current = found;
         setSpec(found);
         setLevels(null);
+        paramValsRef.current = {};
+        setParamVals({});
         notesRef.current = [];
         setNotes([]);
         if (guiRef.current && found) { closeRackDeviceGui(found, guiRef.current.index); }
@@ -234,7 +252,9 @@ export default function RackVizPanel({ strudelRef }) {
                 <React.Fragment key="src">
                   <DeviceRow
                     name={`${source.plugin} (source)`}
+                    pluginId={source.plugin}
                     params={source.params}
+                    liveVals={paramVals['-1']}
                     level={levels?.source}
                     onParam={(id, v) => setRackParam(spec, -1, id, v)}
                     onView={() => openNative(-1)}
@@ -247,8 +267,10 @@ export default function RackVizPanel({ strudelRef }) {
                 <React.Fragment key={d.index}>
                   <DeviceRow
                     name={d.plugin ?? `device ${d.index}`}
+                    pluginId={d.plugin ?? String(d.index)}
                     bypassed={d.bypassed || (levels && !levels.devices.find((x) => x.index === d.index)?.on)}
                     params={d.params}
+                    liveVals={paramVals[String(d.index)]}
                     level={levels?.devices?.find((x) => x.index === d.index)}
                     onParam={(id, v) => setRackParam(spec, d.index, id, v)}
                     onToggle={(on) => setRackDeviceOn(spec, d.index, on)}
@@ -266,13 +288,34 @@ export default function RackVizPanel({ strudelRef }) {
   );
 }
 
-function DeviceRow({ name, params = [], level, bypassed, onParam, onToggle, onView, viewOpen }) {
-  const [vals, setVals] = useState({});
+function DeviceRow({ name, pluginId, params = [], liveVals, level, bypassed, onParam, onToggle, onView, viewOpen }) {
+  const [vals, setVals] = useState({});       // local drag values (win while dragging)
+  const [open, setOpen] = useState(false); // parameter sliders collapsed by default
+  const [copied, setCopied] = useState(null); // param name whose Strudel target was just copied
+  const [dragging, setDragging] = useState(false); // while true, the slider shows the drag value, not the live one
   const lvl = level ? Math.max(level.peak, level.rms * 2) : 0;
+  // click a param name to copy its Strudel target, e.g. .rp('org.faust.aether/detune_cents', …)
+  const copyTarget = (p) => {
+    const target = `${pluginId}/${p.name}`;
+    try { navigator.clipboard?.writeText(target); } catch { /* clipboard may be unavailable */ }
+    setCopied(p.name);
+    setTimeout(() => setCopied((c) => (c === p.name ? null : c)), 1200);
+  };
   return (
     <div style={{ border: '1px solid #2a2f3a', borderRadius: 6, padding: '4px 8px', opacity: bypassed ? 0.45 : 1 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        {params.length > 0 && (
+          <button className="mini" style={{ fontSize: 10, cursor: 'pointer' }} onClick={() => setOpen((o) => !o)}
+            title={open ? 'Hide parameters' : 'Show parameters'} aria-expanded={open}>
+            {open ? '▾' : '▸'}
+          </button>
+        )}
         <span style={{ flex: '1 1 auto', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</span>
+        {params.length > 0 && (
+          <span style={{ fontSize: 10, color: '#9aa4b2', cursor: 'pointer' }} onClick={() => setOpen((o) => !o)}>
+            {params.length} params
+          </span>
+        )}
         <span style={{ flex: '0 0 80px', height: 6, background: '#1c2027', borderRadius: 3, overflow: 'hidden' }}>
           <span style={{ display: 'block', height: '100%', width: `${Math.min(100, lvl * 100)}%`, background: '#75baff' }} />
         </span>
@@ -287,11 +330,18 @@ function DeviceRow({ name, params = [], level, bypassed, onParam, onToggle, onVi
           </button>
         )}
       </div>
-      {params.map((p) => {
-        const v = vals[p.id] ?? p.def ?? p.min ?? 0;
+      {open && params.map((p) => {
+        // live value from the worklet (code-driven .rp/.lfo/.env and slider echoes) wins over
+        // the drag-local value except while the user is actively dragging
+        const lv = liveVals?.[p.id];
+        const v = dragging ? (vals[p.id] ?? lv?.value ?? p.def ?? p.min ?? 0) : (lv?.value ?? vals[p.id] ?? p.def ?? p.min ?? 0);
         return (
           <div key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, marginTop: 2 }}>
-            <span style={{ flex: '0 0 30%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: '#9aa4b2' }} title={p.name}>{p.name}</span>
+            <span
+              style={{ flex: '0 0 30%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: copied === p.name ? '#8ab4f8' : '#9aa4b2', cursor: 'copy' }}
+              title={`click to copy the Strudel target ${pluginId}/${p.name} — use it as .rp('${pluginId}/${p.name}', …) or .lfo({ c: '${pluginId}/${p.name}', … })`}
+              onClick={() => copyTarget(p)}
+            >{copied === p.name ? `${pluginId}/${p.name} ✓` : p.name}</span>
             <input
               type="range"
               style={{ flex: '1 1 auto', minWidth: 40 }}
@@ -299,9 +349,14 @@ function DeviceRow({ name, params = [], level, bypassed, onParam, onToggle, onVi
               max={p.max ?? 1}
               step={p.stepped ? Math.max(1e-9, ((p.max ?? 1) - (p.min ?? 0)) / 100) : Math.max(1e-9, ((p.max ?? 1) - (p.min ?? 0)) / 1000)}
               value={v}
+              onPointerDown={() => setDragging(true)}
+              onPointerUp={() => setDragging(false)}
               onChange={(e) => { const nv = parseFloat(e.target.value); setVals((s) => ({ ...s, [p.id]: nv })); onParam?.(p.id, nv); }}
             />
-            <span style={{ flex: '0 0 48px', textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: '#9aa4b2' }}>{Number(v).toPrecision(3)}</span>
+            <span
+              style={{ flex: '0 0 48px', textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: lv?.mods > 0 ? '#ffcc00' : '#9aa4b2' }}
+              title={lv?.mods > 0 ? `modulated by ${lv.mods} lfo/env from the pattern` : undefined}
+            >{Number(v).toPrecision(3)}</span>
           </div>
         );
       })}
@@ -310,19 +365,35 @@ function DeviceRow({ name, params = [], level, bypassed, onParam, onToggle, onVi
 }
 
 function NativeView({ index, url, onClose, iframeRef }) {
+  // "maximise" = a fixed full-window overlay on the SAME wrapper, so the iframe is never remounted
+  // (the plugin page and its clap.webview frame relay keep running). Esc restores.
+  const [max, setMax] = useState(false);
+  useEffect(() => {
+    if (!max) return;
+    const onKey = (e) => { if (e.key === 'Escape') setMax(false); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [max]);
+  const wrap = max
+    ? { position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', flexDirection: 'column', background: '#111012', border: '1px solid #2a2f3a' }
+    : { margin: '2px 0 4px 10px', border: '1px solid #2a2f3a', borderRadius: 6, overflow: 'hidden' };
   return (
-    <div style={{ margin: '2px 0 4px 10px', border: '1px solid #2a2f3a', borderRadius: 6, overflow: 'hidden' }}>
+    <div style={wrap}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '3px 8px', background: '#171a20' }}>
         <span style={{ flex: '1 1 auto', fontSize: 11, color: '#9aa4b2' }}>
-          device {index === -1 ? 'source' : index} native view
+          device {index === -1 ? 'source' : index} native view{max ? ' · Esc to restore' : ''}
         </span>
+        <button className="mini" style={{ fontSize: 10, cursor: 'pointer' }} onClick={() => setMax((m) => !m)}
+          title={max ? 'Restore size' : 'Maximise to the full window'}>
+          {max ? '⤡ restore' : '⤢ maximise'}
+        </button>
         <button className="mini" style={{ fontSize: 10, cursor: 'pointer' }} onClick={onClose}>close ×</button>
       </div>
       <iframe
         ref={iframeRef}
         src={url}
         title={`rack device ${index}`}
-        style={{ width: '100%', height: 320, border: 0, display: 'block', background: '#111012' }}
+        style={{ width: '100%', height: max ? undefined : 320, flex: max ? '1 1 auto' : undefined, border: 0, display: 'block', background: '#111012' }}
       />
     </div>
   );

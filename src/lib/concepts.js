@@ -413,6 +413,38 @@ export const STRUDEL_CONCEPTS = [
     example: (n) => `midicmd("clock*48,<start stop>/2").midi('IAC Driver')`,
     match: /\bmidicmd\s*\(/,
   },
+
+  // ---- WCLAP racks (saved Synth.is rack configurations played from Strudel) ----
+  // The bundle is served from public/racks/. Targets are 'module.id/param' — click a param
+  // name in the rack viz panel below the pad to copy one. Single quotes for targets/URL in
+  // the REPL (double quotes are mini-notation); double quotes only for value patterns.
+  {
+    id: 'rack-play', category: 'WCLAP racks', label: 'Play a saved rack', quick: true,
+    explain: 'A saved Synth.is rack (instrument + effect chain) played as one sound: s("wclap-rack").rack(url). Per-note .lpf()/.room() still work around it.',
+    example: () => `note("c3 e3 g3 c4").s("wclap-rack").rack('/racks/synth-fx-rack.wclap-rack.tar.gz')`,
+    match: /\.rack\s*\(/,
+  },
+  {
+    id: 'rack-param', category: 'WCLAP racks', label: 'Set a module param (.rp)', quick: true,
+    explain: 'Set a WCLAP module param per note: .rp(\'module.id/param\', value) — the value may be a pattern. The rack viz sliders follow code changes and vice versa.',
+    example: () => `note("c3 e3 g3 c4").s("wclap-rack").rack('/racks/synth-fx-rack.wclap-rack.tar.gz')\n  .rp('org.faust.aether/detune_cents', "0 12 24 45")`,
+    match: /\.rp\s*\(|\.rackparam\s*\(/,
+  },
+  {
+    id: 'rack-lfo', category: 'WCLAP racks', label: 'LFO a module param', quick: true,
+    explain: 'Strudel’s .lfo() modulates a rack param — right after .rp() the target is implicit. rate in Hz (or sync: a fraction of the tempo, e.g. sync: 0.25), depthabs absolute / depth relative to the value.',
+    example: () => `note("c2").slow(2).s("wclap-rack").rack('/racks/synth-fx-rack.wclap-rack.tar.gz')\n  .rp('org.faust.aether/cutoff', 500)\n  .lfo({ rate: 0.5, depthabs: 4000, shape: 'saw' }) // watch the cutoff slider in the rack viz`,
+  },
+  {
+    id: 'rack-env', category: 'WCLAP racks', label: 'Envelope a module param (.env)',
+    explain: 'A per-note ADSR on a rack param: .env({ a, d, s, r }) rises on each note, sustains until note-off, then releases.',
+    example: () => `note("c3 e3 g3 e3").s("wclap-rack").rack('/racks/synth-fx-rack.wclap-rack.tar.gz')\n  .rp('org.faust.aether/cutoff', 200)\n  .env({ a: 0.05, d: 0.4, s: 0.2, r: 0.5, depthabs: 8000 })`,
+  },
+  {
+    id: 'rack-fx', category: 'WCLAP racks', label: 'Drive an effect in the chain',
+    explain: 'Devices are addressed by index or module id: \'0/Speed\' is device 0, \'1/Size\' device 1, \'-1/x\' or \'source/x\' the instrument. Several params at once: .rp({ … }).',
+    example: () => `note("c3").slow(2).s("wclap-rack").rack('/racks/synth-fx-rack.wclap-rack.tar.gz')\n  .rp({ 'studio.opendaw.commons.wet-chorus/Speed': 5, '1/Size': 0.6 })\n  .lfo({ c: 'studio.opendaw.commons.wet-chorus/Speed', rate: 0.25, depth: 0.8 })`,
+  },
 ];
 
 // Csound concepts. Unlike Strudel's one-liners, every example here is a COMPLETE

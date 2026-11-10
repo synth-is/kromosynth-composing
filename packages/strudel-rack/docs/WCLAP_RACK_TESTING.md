@@ -1,5 +1,9 @@
 # Testing wclap-rack bundles — plugin preset + Strudel
 
+Lives with `@kromosynth/strudel-rack` (`packages/strudel-rack/docs/`). Section B below is this
+package's own surface; sections A and C reference sibling repos (`kromosynth-plugin`,
+`~/Developer/apps/WCLAP/wclap-rack`) by absolute path.
+
 2026-11-09. How to try a saved rack configuration (a `*.wclap-rack.tar.gz` — rack.json +
 MANIFEST.json + sha256-pinned WCLAP archives; spec in `~/Developer/apps/WCLAP/wclap-rack/SPEC.md`)
 in the two places built tonight:
@@ -61,14 +65,15 @@ node ~/Developer/apps/WCLAP/wclap-rack/tools/unpack-rack.mjs \
   rack's state blob (`wclapRackState` = rack.json + per-device clap.state) restores the sound.
 - Logs: `instrument_load id=my-rack kind=wclap-rack ok=1 devices=3 …`.
 
-Known gaps (see `kromosynth-plugin/docs/WCLAP_RACK_PRESET_2026-11-09.md`): no per-device editor UI
+Known gaps (see `~/Developer/apps/synth.is/kromosynth-plugin/docs/WCLAP_RACK_PRESET_2026-11-09.md`): no per-device editor UI
 yet; no headless fingerprint comparison vs the JS reference host (needs the bridge built locally
 — do that on the Studio).
 
 ## B. In Strudel — locally and on composing.synth.is
 
-The package `@kromosynth/strudel-rack` (packages/strudel-rack) is wired into this project:
-`src/lib/rackSounds.js` self-installs at import (App.jsx imports it), registering the sound
+The package `@kromosynth/strudel-rack` (this directory, `packages/strudel-rack`) is wired into
+the composing app (`kromosynth-composing`, i.e. `../..` from here):
+`../../src/lib/rackSounds.js` self-installs at import (App.jsx imports it), registering the sound
 `wclap-rack` and the pattern method `.rack(cfg)` (alias `.wclaprack()`) into the editor's Strudel
 instance after prebake — same pattern as `faustInstruments.js`.
 
@@ -92,8 +97,9 @@ Per-hap gain is applied on per-hap gain nodes fanned out from the shared node, s
 button) the rack is rendered per note with the reference host's `renderRack` and played as a
 buffer source.
 
-Verified 2026-11-09 with `npm run start` (http://localhost:5273), the example bundle copied to
-`public/racks/synth-fx-rack.wclap-rack.tar.gz`, pattern
+Verified 2026-11-09 with `npm run start` (http://localhost:5273) in the composing app, the example
+bundle copied to the app's `../../public/racks/synth-fx-rack.wclap-rack.tar.gz` (served at
+`/racks/synth-fx-rack.wclap-rack.tar.gz`), pattern
 `note("c3 e3 g3 c4").s("wclap-rack").rack('/racks/synth-fx-rack.wclap-rack.tar.gz')`:
 
 - live: exactly 1 `wclap-rack` worklet node for the whole pattern, audio out of it
@@ -103,7 +109,7 @@ Verified 2026-11-09 with `npm run start` (http://localhost:5273), the example bu
 
 ### Rack viz panel (2026-11-09, later)
 
-Below the Strudel pad there is now a **rack viz** panel (src/components/RackVizPanel.jsx) that drives
+Below the Strudel pad there is now a **rack viz** panel (`../../src/components/RackVizPanel.jsx` in the composing app) that drives
 itself off the live pattern — no viz method needed in the buffer:
 
 - **waveform** of the RAW rack output: an analyser fan-out on the shared worklet node
@@ -123,6 +129,44 @@ Plain Strudel viz also works on rack patterns as-is (superdough taps every sound
 an analyser): `.scope({id: 3, ctx})` / `.fscope(...)` / `.spectrum(...)` and `.pianoroll({ctx})` —
 pass a named canvas's 2d context as `ctx` to render into a panel instead of the full-screen canvas.
 
+### Driving module params from the pattern: `.rp()` + `.lfo()`
+
+`.rp(target, value)` (alias `.rackparam`) sets a WCLAP param of a rack slot per hap; the target is
+the module id + param name shown in the viz (click a param name in the panel to copy it as a
+target). `.lfo()` modulates a rack param — either with an explicit `c:` target or, with no `c`,
+the `.rp()` target set just before it:
+
+```js
+note("c3 e3 g3").s("wclap-rack").rack('/racks/synth-fx-rack.wclap-rack.tar.gz')
+  .rp('org.faust.aether/detune_cents', "5 40")                       // per-hap values
+  .lfo({ c: 'org.faust.aether/detune_cents', rate: 3, depthabs: 25 }) // or implicit after .rp()
+note("c3").s("wclap-rack").rack('/racks/synth-fx-rack.wclap-rack.tar.gz')
+  .rp('org.faust.aether/detune_cents', 30).lfo({ rate: 3, depthabs: 25 })
+```
+
+Target forms: `'module.id/param'`, `'0/param'` / `'-1/param'` / `'source/param'` (device index),
+or a bare `'param'` when unambiguous. Single quotes for targets/URLs in the REPL (double quotes are
+mini-notation). Live, the worklet runs the modulator on the audio clock (param events per 128-frame
+block, base value restored at hap end); the offline bounce renders the same curve as param events.
+`.env()` works the same way (per-note ADSR on a param; sustains until note-off, then releases):
+
+```js
+note("c3").s("wclap-rack").rack('/racks/synth-fx-rack.wclap-rack.tar.gz')
+  .rp('org.faust.aether/cutoff', 300).env({ a: 0.05, d: 0.2, s: 0.1, r: 0.3, depthabs: 15000 })
+```
+
+(`.bmod()` is the one Strudel modulator not supported on rack params — a bus is audio-rate and a
+wasm param can't tap it; it's stripped with a warning.) Unknown targets warn once and are ignored;
+bad param ids produce a `paramError` worklet message, not an audio-thread crash. Details in
+`../README.md`; node tests in `test/node-tests.mjs`.
+
+The rack viz sliders are two-way synced with the code: the worklet pushes `paramValue` on every
+applied param and `paramValues` on each meter tick (modulated params every tick), so sliders
+track `.rp()`/`.lfo()`/`.env()` changes live (an LFO animates its slider, shown amber), and a
+slider drag sends `param` and the echo updates the slider to the clamped value. Ready-made
+snippets live in the app's Concepts palette under "WCLAP racks" (play a rack, .rp, .lfo, .env,
+drive an FX device) — all five verified to evaluate in the bundled REPL.
+
 Verified 2026-11-09 in the browser: panel shows the rack name, waveform pixels + pianoroll pixels
 non-zero while playing, 118 param sliders across aether/wet-chorus/pearls, level bars at 3-7%.
 
@@ -131,7 +175,7 @@ non-zero while playing, 118 param sliders across aether/wet-chorus/pearls, level
 Each device row has a **view** button that opens the plugin's OWN editor page (the same webview UI the
 Synth.is plugin shows) in an iframe inside the panel, one device at a time, with a "close ×" button.
 The page files (index.html + resource/*) are untarred from the rack bundle in the page and served by
-`public/wclap-sw.js` under `/__wclap__/<prefix>/<bundleKey>/…`; frames relay page <-> worklet over
+the app's `../../public/wclap-sw.js` under `/__wclap__/<prefix>/<bundleKey>/…`; frames relay page <-> worklet over
 clap.webview (`guiOpen`/`guiReceive`/`guiClose` messages, `guiFrame` back). The whole panel also
 collapses to its toolbar line (▸/▾) — handy with several racks. strudel-rack exports for this:
 `openRackDeviceGui`, `sendRackGuiFrame`, `closeRackDeviceGui`, `handleRackGuiMessage`, `getRack`,
@@ -141,10 +185,11 @@ clap.webview/3 host extension + `guiOpenWebview/guiReceive/onMainThread` on the 
 Verified 2026-11-09 in the browser: clicking view on WetChorus loads title "WetChorus", canvas 960 px
 wide, ~613k painted pixels (guest status frames flowing), 301 guiFrames during a slider move; the
 panel's 118 param sliders drive the guest via `param` messages. Note: vite caches linked `file:`
-packages — restart `npm run start` after editing packages/strudel-rack, and if the SW misbehaves,
-unregister it (DevTools) once; `wclap-sw.js` keys must not be double-prefixed.
+packages — restart the app's dev server (`npm run start` in `../..`) after editing this package,
+and if the SW misbehaves, unregister it (DevTools) once; `wclap-sw.js` keys must not be double-prefixed.
 
-**Locally** (dev server), serve a rack bundle and use its URL, or the self-contained test page:
+**Locally** (dev server), serve a rack bundle and use its URL, or the self-contained test page
+(see the package README's Test section for serving `test/` from this directory):
 
 ```sh
 # from the wclap-rack repo: serve the apps tree
@@ -155,8 +200,8 @@ open http://127.0.0.1:8139/synth.is/kromosynth-composing/packages/strudel-rack/t
 open http://127.0.0.1:8137/test-host/?bundle=/examples/synth-fx-rack/synth-fx-rack.wclap-rack.tar.gz
 ```
 
-In the composing dev server (`npm run dev` in kromosynth-composing) the bundle must be reachable
-by URL — drop it under `public/` or serve it from anywhere and pass the absolute URL to `.rack()`.
+In the composing dev server (`npm run dev` in `../..`) the bundle must be reachable
+by URL — drop it under the app's `public/` (`../../public/`) or serve it from anywhere and pass the absolute URL to `.rack()`.
 
 ## C. Command-line (no browser)
 

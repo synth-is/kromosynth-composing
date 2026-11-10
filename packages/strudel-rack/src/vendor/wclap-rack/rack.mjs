@@ -115,6 +115,11 @@ export async function renderRack({ rack, bundles, input, sampleRate = 48000, blo
 				...Object.entries(s.params ?? {}).map(([k, v]) => ({
 					frame: 0, type: 'param', id: plugin.param(isNaN(Number(k)) ? k : Number(k))?.id ?? k, value: v,
 				})),
+				// strudel-rack local extension (not in the upstream reference host): extra param
+				// events, e.g. LFO automation sampled per block — { frame, type:'param', id, value }
+				// in the same coordinates as notes (frame 0 = pre-roll start); id may be a name,
+				// "module/name", or numeric id — render() resolves it like any event.
+				...(s.paramEvents ?? []),
 				...((s.notes ?? [{ key: 60, velocity: 0.8, frame: 0 }]).map((n, i) => [
 					{ frame: preRoll + (n.frame ?? 0), type: 'noteOn', key: n.key, velocity: n.velocity ?? 0.8, channel: 0, noteId: i + 1 },
 					{ frame: preRoll + (n.frame ?? 0) + (n.frames ?? len), type: 'noteOff', key: n.key, velocity: 0, channel: 0, noteId: i + 1 },
@@ -141,9 +146,13 @@ export async function renderRack({ rack, bundles, input, sampleRate = 48000, blo
 		try {
 			plugin.activate({ sampleRate, blockSize });
 			if (d.state) plugin.loadState(decodeState(d.state));
-			const events = Object.entries(d.params ?? {}).map(([k, v]) => ({
-				frame: 0, type: 'param', id: plugin.param(isNaN(Number(k)) ? k : Number(k))?.id ?? k, value: v,
-			}));
+			const events = [
+				...Object.entries(d.params ?? {}).map(([k, v]) => ({
+					frame: 0, type: 'param', id: plugin.param(isNaN(Number(k)) ? k : Number(k))?.id ?? k, value: v,
+				})),
+				// strudel-rack local extension (see the source branch above)
+				...(d.paramEvents ?? []),
+			];
 			const out = plugin.renderEffect({ input: cur, preRoll: 0, events }); // preRoll 0: prepended above; latency dropped per device
 			latency += plugin.latency();
 			tail = Math.max(tail, plugin.tail());
